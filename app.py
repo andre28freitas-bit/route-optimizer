@@ -1156,14 +1156,16 @@ if st.button(
             "visits",
             [],
         ):
+            # Na resposta JSON da Google, shipmentIndex=0 pode ser omitido
+            # por ser o valor inteiro por defeito. Nesse caso, o índice é 0.
             shipment_index = visit.get(
-                "shipmentIndex"
+                "shipmentIndex",
+                0,
             )
 
-            if shipment_index is not None:
-                ordered_clients.append(
-                    clients[shipment_index]
-                )
+            ordered_clients.append(
+                clients[shipment_index]
+            )
 
         if not ordered_clients:
             st.error(
