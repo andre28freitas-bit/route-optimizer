@@ -9,6 +9,12 @@ from google.oauth2 import service_account
 from streamlit_js_eval import get_geolocation
 from streamlit_sortables import sort_items
 
+from toll_data_national import (
+    apply_2026_zero_overrides,
+    coverage_summary,
+    load_imt_2026,
+)
+
 
 # =========================================================
 # APP CONFIG
@@ -128,6 +134,32 @@ def auth_headers():
 def get_project_id():
     info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     return info["project_id"]
+
+
+# =========================================================
+# NATIONAL TOLL DATA
+# =========================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_national_toll_data():
+    """Load and cache the official 2026 national toll tariff base."""
+    segments = apply_2026_zero_overrides(load_imt_2026())
+    return segments, coverage_summary(segments)
+
+
+def national_toll_base_status():
+    try:
+        _, info = get_national_toll_data()
+        return {
+            "ok": True,
+            "segments": info.get("segments_loaded", 0),
+            "roads": info.get("roads_count", 0),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
 
 
 # =========================================================
@@ -733,7 +765,7 @@ def build_navigation_links(
 
     # Conservador para mobile:
     # localização atual + até 3 waypoints + destino
-    points_per_link = 8
+    points_per_link = 4
 
     index = 0
     number = 1
