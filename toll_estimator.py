@@ -15,53 +15,15 @@ IP_ROAD_LAYER_QUERY = (
 # the official IP road layer itself marks as tolled (portagem=sim).
 # Unknown tolled motorway refs use the conservative national fallback.
 TOLL_RATE_PER_KM_BY_ROAD = {
-    "A1": 0.090,
-    "A2": 0.106,
-    "A3": 0.104,
-    "A4": 0.098,
-    "A5": 0.105,
-    "A6": 0.109,
-    "A7": 0.105,
-    "A8": 0.106,
-    "A9": 0.109,
-    "A10": 0.108,
-    "A11": 0.105,
-    "A12": 0.100,
-    "A13": 0.107,
-    "A13-1": 0.107,
-    "A14": 0.108,
-    "A15": 0.107,
-    "A16": 0.105,
-    "A17": 0.119,
-    "A18": 0.105,
-    "A19": 0.105,
-    "A20": 0.105,
-    "A21": 0.106,
+    # MVP: one configurable average rate for every detected tolled kilometre.
+    # Roads currently toll-free remain overridden to 0 below.
     "A22": 0.000,
     "A23": 0.000,
     "A24": 0.000,
     "A25": 0.000,
-    "A26": 0.105,
-    "A27": 0.105,
-    "A28": 0.105,
-    "A29": 0.105,
-    "A30": 0.105,
-    "A31": 0.105,
-    "A32": 0.106,
-    "A33": 0.105,
-    "A34": 0.105,
-    "A36": 0.105,
-    "A37": 0.105,
-    "A38": 0.105,
-    "A39": 0.105,
-    "A40": 0.105,
-    "A41": 0.105,
-    "A42": 0.105,
-    "A43": 0.105,
-    "A44": 0.105,
 }
 
-DEFAULT_TOLL_RATE_PER_KM = 0.105
+DEFAULT_TOLL_RATE_PER_KM = 0.080
 
 # Approximate ratios between Portuguese toll classes. We are estimating the
 # price after identifying the actual tolled kilometres, not reproducing a toll
