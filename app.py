@@ -668,7 +668,7 @@ def build_preview_links(
 
     # Explicit origin + up to 9 intermediate waypoints + destination.
     # This is intended as a planning preview, not turn-by-turn navigation.
-    max_destinations_per_link = 10
+    max_destinations_per_link = 7
     links = []
     cursor = 0
     segment_origin = origin["formatted"]
