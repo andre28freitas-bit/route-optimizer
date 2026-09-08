@@ -10,6 +10,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 from streamlit_js_eval import get_geolocation
 from streamlit_sortables import sort_items
+from toll_estimator import estimate_portuguese_tolls, DEFAULT_TOLL_RATE_PER_KM, TOLL_MODEL_VERSION
 
 
 # =========================================================
@@ -130,44 +131,6 @@ def auth_headers():
 def get_project_id():
     info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     return info["project_id"]
-
-
-# =========================================================
-# TOLL ESTIMATE
-# =========================================================
-
-# MVP business estimate by motorway/corridor (Class 1).
-# Factors are derived from 2026 official IMT tariff tables where available:
-# sum of Class 1 segment tolls / tolled kilometres. They remain estimates,
-# because Google route steps identify the motorway, not the exact toll gate.
-TOLL_RATE_PER_KM_BY_ROAD = {
-    "A1": 0.090,
-    "A2": 0.106,
-    "A3": 0.104,
-    "A4": 0.098,
-    "A5": 0.105,
-    "A6": 0.109,
-    "A8": 0.106,
-    "A9": 0.109,
-    "A10": 0.108,
-    "A12": 0.099,
-    "A13": 0.107,
-    "A14": 0.108,
-    "A15": 0.107,
-    "A17": 0.119,
-    "A21": 0.106,
-    "A32": 0.106,
-    "A41": 0.105,
-}
-
-# Roads whose tolls were abolished nationally (or on the relevant full
-# corridor) are treated as free. Roads with only partial exemptions are NOT
-# placed here, because a motorway-level detector cannot distinguish sections.
-FREE_MOTORWAYS_2026 = {"A22", "A23", "A24", "A25"}
-
-# Conservative fallback only when Google identifies an A-road for which we do
-# not yet have a specific factor.
-DEFAULT_TOLL_RATE_PER_KM = 0.105
 
 
 # =========================================================
@@ -412,62 +375,12 @@ def optimize_route(
 
 
 # =========================================================
-# MOTORWAY KM ESTIMATE FROM GOOGLE ROUTE STEPS
+# PORTAGENS — GEOMETRIA OFICIAL IP
 # =========================================================
 
-def _motorway_ref_from_instruction(text):
-    """Return a Portuguese motorway ref (A1, A3, A28, A13-1, ...) if present."""
-    text = (text or "").upper()
-    match = re.search(
-        r"(?<![A-Z0-9])A\s*[- ]?(\d{1,2})(?:\s*[-/]\s*(\d))?",
-        text,
-    )
-    if not match:
-        return None
-    road = f"A{match.group(1)}"
-    if match.group(2):
-        road += f"-{match.group(2)}"
-    return road
-
-
-def estimate_motorway_km_from_google(route_json):
-    """
-    Estimate motorway kilometres directly from Google Routes leg steps.
-
-    Google gives each navigation step a distance. When the navigation
-    instruction explicitly names an A-road (A1, A3, A28, ...), that step's
-    distance is counted as motorway distance.
-
-    This keeps the MVP cheap and deterministic: no toll-price API and no
-    national tariff matching. The monetary value is an explicit average.
-    """
-    total_m = 0.0
-    by_road_m = {}
-
-    for leg in route_json.get("legs", []):
-        for step in leg.get("steps", []):
-            instruction = (
-                step.get("navigationInstruction", {})
-                .get("instructions", "")
-            )
-            road = _motorway_ref_from_instruction(instruction)
-            if not road:
-                continue
-
-            distance_m = float(step.get("distanceMeters", 0) or 0)
-            if distance_m <= 0:
-                continue
-
-            total_m += distance_m
-            by_road_m[road] = by_road_m.get(road, 0.0) + distance_m
-
-    return {
-        "motorway_km": total_m / 1000.0,
-        "by_road_km": {
-            road: metres / 1000.0
-            for road, metres in sorted(by_road_m.items())
-        },
-    }
+# A estimativa é feita em toll_estimator.py a partir da polyline Google e da
+# camada pública da Infraestruturas de Portugal, que marca os troços com
+# portagem. Assim não cobramos automaticamente todos os km de uma autoestrada.
 
 
 # =========================================================
@@ -513,8 +426,6 @@ def compute_fixed_route(
     headers["X-Goog-FieldMask"] = (
         "routes.distanceMeters,"
         "routes.duration,"
-        "routes.legs.steps.distanceMeters,"
-        "routes.legs.steps.navigationInstruction.instructions,"
         "routes.polyline.encodedPolyline"
     )
     headers["X-Goog-User-Project"] = get_project_id()
@@ -537,52 +448,41 @@ def compute_fixed_route(
 
     route = routes[0]
 
-    # For the route explicitly calculated to avoid tolls, the business model
-    # assumes €0 in tolls. For the route with tolls allowed, estimate the cost
-    # from Google motorway kilometres × the configured national average.
-    motorway = estimate_motorway_km_from_google(route)
-    motorway_km = motorway["motorway_km"]
+    encoded_polyline = (
+        route.get("polyline", {}).get("encodedPolyline", "")
+    )
+    route_path = decode_polyline(encoded_polyline)
 
     if avoid_tolls:
         toll_cost = 0.0
         toll_known = True
         contains_tolls = False
-        toll_source = "Sem portagens (rota Google)"
+        toll_source = "0 € — alternativa calculada para evitar portagens"
         chargeable_motorway_km = 0.0
+        motorway_km = 0.0
+        motorway_by_road_km = {}
     else:
-        toll_cost = 0.0
-        chargeable_motorway_km = 0.0
-        toll_breakdown = []
-
-        for road, km in motorway["by_road_km"].items():
-            if road in FREE_MOTORWAYS_2026:
-                rate = 0.0
-            else:
-                rate = TOLL_RATE_PER_KM_BY_ROAD.get(
-                    road, DEFAULT_TOLL_RATE_PER_KM
-                )
-
-            road_cost = km * rate
-            toll_cost += road_cost
-            if rate > 0:
-                chargeable_motorway_km += km
-
-            toll_breakdown.append(
-                f"{road}: {km:.1f} km × {rate:.3f} €/km"
+        try:
+            toll_estimate = estimate_portuguese_tolls(
+                route_path,
+                vehicle_class=toll_vehicle_class,
             )
-
-        toll_known = True
-        contains_tolls = toll_cost > 0
-        if toll_breakdown:
-            toll_source = "Estimativa por autoestrada: " + " · ".join(
-                toll_breakdown
-            )
-        else:
-            toll_source = "Sem autoestrada identificada na rota Google"
-
-    encoded_polyline = (
-        route.get("polyline", {}).get("encodedPolyline", "")
-    )
+            toll_cost = toll_estimate["cost"]
+            toll_known = toll_estimate["known"]
+            chargeable_motorway_km = toll_estimate["tolled_km"]
+            motorway_km = chargeable_motorway_km
+            motorway_by_road_km = toll_estimate["by_road_km"]
+            toll_source = toll_estimate["source"]
+            contains_tolls = toll_cost > 0 or chargeable_motorway_km > 0
+        except Exception as exc:
+            # Não inventar €0 nem voltar ao antigo cálculo por todos os km de AE.
+            toll_cost = 0.0
+            toll_known = False
+            contains_tolls = True
+            chargeable_motorway_km = 0.0
+            motorway_km = 0.0
+            motorway_by_road_km = {}
+            toll_source = f"Estimativa indisponível: {exc}"
 
     return {
         "distance_km": route.get("distanceMeters", 0) / 1000,
@@ -596,9 +496,9 @@ def compute_fixed_route(
         "avoid_tolls": avoid_tolls,
         "motorway_km": round(motorway_km, 1),
         "chargeable_motorway_km": round(chargeable_motorway_km, 1),
-        "motorway_by_road_km": motorway["by_road_km"],
+        "motorway_by_road_km": motorway_by_road_km,
         "encoded_polyline": encoded_polyline,
-        "path": decode_polyline(encoded_polyline),
+        "path": route_path,
     }
 
 
@@ -924,6 +824,7 @@ def show_comparison_card(
 # =========================================================
 
 st.title("🚚 Route Optimizer")
+st.caption(f"Modelo de portagens: {TOLL_MODEL_VERSION} · {DEFAULT_TOLL_RATE_PER_KM:.3f} €/km portajado")
 st.caption("Planeia. Compara. Decide. Navega.")
 
 st.markdown("## Nova rota")
