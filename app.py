@@ -755,8 +755,8 @@ def build_navigation_links(
     links = []
 
     # A navegação final é pensada para abrir diretamente na app Google Maps.
-    # Até 9 waypoints + destino por link.
-    points_per_link = 10
+    # Navegação final dividida em blocos de até 5 paragens por link.
+    points_per_link = 5
 
     index = 0
     number = 1
@@ -1341,12 +1341,12 @@ if st.session_state.route_data:
     st.divider()
 
     st.markdown(
-        "## ↕️ Ajustar visitas"
+        "## 🧭 Rota recomendada"
     )
 
     st.caption(
-        "Mantém pressionado e arrasta "
-        "para mudar a ordem."
+        "Esta é a ordem recomendada. "
+        "Altera a ordem apenas se for relevante — mantém pressionado e arrasta."
     )
 
     drag_items = []
@@ -1439,25 +1439,6 @@ if st.session_state.route_data:
                 st.code(
                     str(error)
                 )
-
-    st.markdown(
-        "### 📋 Ordem atual"
-    )
-
-    for index, client in enumerate(
-        current_clients,
-        start=1,
-    ):
-        with st.container(
-            border=True
-        ):
-            st.caption(
-                f"PARAGEM {index}"
-            )
-
-            st.write(
-                client["original"]
-            )
 
     st.divider()
 
