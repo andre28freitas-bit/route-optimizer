@@ -1,4 +1,5 @@
 import math
+import re
 from collections import defaultdict
 
 import requests
@@ -24,7 +25,7 @@ TOLL_RATE_PER_KM_BY_ROAD = {
 }
 
 DEFAULT_TOLL_RATE_PER_KM = 0.080
-TOLL_MODEL_VERSION = "v2-0.08"
+TOLL_MODEL_VERSION = "v3-0.08-fallback"
 
 # Approximate ratios between Portuguese toll classes. We are estimating the
 # price after identifying the actual tolled kilometres, not reproducing a toll
@@ -316,6 +317,72 @@ def estimate_portuguese_tolls(
         source = "IP (troços portajados) · " + " · ".join(details)
     else:
         source = "Rede oficial IP: nenhum troço portajado cruzado"
+
+    return {
+        "known": True,
+        "cost": round(total_cost, 2),
+        "tolled_km": round(tolled_km, 1),
+        "by_road_km": by_road_km,
+        "source": source,
+    }
+
+
+MOTORWAY_RE = re.compile(r"(?<![A-Z0-9])A\s*[- ]?\s*(\d{1,2})(?!\d)", re.IGNORECASE)
+
+
+def estimate_tolls_from_google_steps(steps, vehicle_class=1):
+    """Fallback estimator when the IP GIS service is unavailable.
+
+    Uses only Google route steps whose navigation instruction explicitly names
+    a Portuguese motorway (A1, A3, A28, etc.). It then applies the same
+    configurable average €/km. Fully toll-free motorways are excluded.
+
+    This is intentionally a fallback: it is less precise than the IP geometry
+    matcher for partially free motorways such as the A28.
+    """
+    by_road_m = defaultdict(float)
+
+    for step in steps or []:
+        instruction = (
+            step.get("navigationInstruction", {}).get("instructions", "")
+            or ""
+        )
+        distance_m = float(step.get("distanceMeters", 0) or 0)
+        if distance_m <= 0 or not instruction:
+            continue
+
+        refs = MOTORWAY_RE.findall(instruction.upper())
+        if not refs:
+            continue
+
+        road = f"A{refs[0]}"
+        if road in FULLY_FREE_2026:
+            continue
+
+        by_road_m[road] += distance_m
+
+    by_road_km = {
+        road: metres / 1000.0
+        for road, metres in sorted(by_road_m.items())
+        if metres > 30
+    }
+
+    multiplier = CLASS_MULTIPLIER.get(int(vehicle_class), 1.0)
+    total_cost = 0.0
+    details = []
+
+    for road, km in by_road_km.items():
+        rate = TOLL_RATE_PER_KM_BY_ROAD.get(road, DEFAULT_TOLL_RATE_PER_KM)
+        effective_rate = rate * multiplier
+        total_cost += km * effective_rate
+        details.append(f"{road}: {km:.1f} km × {effective_rate:.3f} €/km")
+
+    tolled_km = sum(by_road_km.values())
+    source = "Fallback Google (AE identificada)"
+    if details:
+        source += " · " + " · ".join(details)
+    else:
+        source += " · nenhum troço de AE portajada identificado"
 
     return {
         "known": True,
