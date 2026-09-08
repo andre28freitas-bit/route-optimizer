@@ -6,6 +6,7 @@ from urllib.parse import quote, urlencode
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 from streamlit_js_eval import get_geolocation
@@ -647,54 +648,89 @@ def google_maps_url(
 
 
 
-def build_preview_links(
-    origin,
-    ordered_clients,
-    round_trip,
-    avoid_tolls,
-):
-    """
-    Google Maps preview with the CURRENT order.
-    Google Maps URLs have waypoint limits, so larger routes are split
-    only when technically necessary.
-    """
+def show_full_route_preview_map(origin, ordered_clients, route):
+    """Show the full current route in one map, with every stop numbered."""
     if not ordered_clients:
-        return []
+        return
 
-    destinations = [client["formatted"] for client in ordered_clients]
+    path = route.get("path", []) or []
+    if not path:
+        st.warning("Não foi possível desenhar o preview completo da rota.")
+        return
 
-    if round_trip:
-        destinations.append(origin["formatted"])
+    markers = [
+        {
+            "label": "P",
+            "name": "Partida",
+            "lat": origin["latitude"],
+            "lon": origin["longitude"],
+        }
+    ]
 
-    # Explicit origin + up to 9 intermediate waypoints + destination.
-    # This is intended as a planning preview, not turn-by-turn navigation.
-    max_destinations_per_link = 7
-    links = []
-    cursor = 0
-    segment_origin = origin["formatted"]
-    part = 1
-
-    while cursor < len(destinations):
-        segment = destinations[cursor:cursor + max_destinations_per_link]
-
-        links.append(
+    for i, client in enumerate(ordered_clients, start=1):
+        markers.append(
             {
-                "number": part,
-                "url": google_maps_url(
-                    origin=segment_origin,
-                    waypoints=segment[:-1],
-                    destination=segment[-1],
-                    avoid_tolls=avoid_tolls,
-                    navigation=False,
-                ),
+                "label": str(i),
+                "name": client.get("original", client.get("formatted", f"Paragem {i}")),
+                "lat": client["latitude"],
+                "lon": client["longitude"],
             }
         )
 
-        segment_origin = segment[-1]
-        cursor += max_destinations_per_link
-        part += 1
+    route_latlng = [[lat, lon] for lon, lat in path]
+    markers_json = json.dumps(markers, ensure_ascii=False)
+    route_json = json.dumps(route_latlng)
 
-    return links
+    html = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <style>
+        html, body, #map {{ height: 520px; margin: 0; }}
+        .num-marker {{
+          width: 30px; height: 30px; border-radius: 50%;
+          background: #111827; color: white; border: 2px solid white;
+          display: flex; align-items: center; justify-content: center;
+          font: 700 13px/1 sans-serif; box-shadow: 0 1px 5px rgba(0,0,0,.35);
+        }}
+        .start-marker {{ background: #047857; }}
+      </style>
+    </head>
+    <body>
+      <div id="map"></div>
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <script>
+        const route = {route_json};
+        const markers = {markers_json};
+        const map = L.map('map');
+        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+          maxZoom: 19,
+          attribution: '&copy; OpenStreetMap contributors'
+        }}).addTo(map);
+
+        const line = L.polyline(route, {{weight: 5, opacity: 0.85}}).addTo(map);
+
+        markers.forEach((m, idx) => {{
+          const cls = idx === 0 ? 'num-marker start-marker' : 'num-marker';
+          const icon = L.divIcon({{
+            className: '',
+            html: `<div class="${{cls}}">${{m.label}}</div>`,
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+          }});
+          L.marker([m.lat, m.lon], {{icon}}).addTo(map).bindPopup(`<b>${{m.label}}</b> · ${{m.name}}`);
+        }});
+
+        map.fitBounds(line.getBounds(), {{padding: [20, 20]}});
+      </script>
+    </body>
+    </html>
+    """
+
+    components.html(html, height=540, scrolling=False)
 
 
 def build_navigation_links(
@@ -808,7 +844,7 @@ def show_comparison_card(
                 toll_text,
             )
             if route.get("toll_known") and route.get("toll_source"):
-                st.caption("Custo estimado de portagens por cada km percorrido em AE: 0,08 €")
+                st.caption("Preço estimado por cada km percorrido em AE: 0,08 €")
 
         col5, col6 = st.columns(2)
 
@@ -1275,41 +1311,25 @@ if st.session_state.route_data:
 
     if comparison_is_current:
         st.markdown(
-            "## 🗺️ Ver ordem atual no Google Maps"
+            "## 🗺️ Preview completo da rota"
         )
 
         st.caption(
-            "O Google Maps abre já com os pontos pela ordem atual. "
-            "Se quiseres mudar a sequência, volta à app, arrasta as visitas "
-            "e abre novamente o Google Maps."
+            "Aqui vês todos os pontos, pela ordem atual, numa única rota. "
+            "Só depois de validares é que os links de navegação são divididos em sub-rotas."
         )
 
-        preview_links = build_preview_links(
+        preview_route = (
+            comparison["without_tolls"]
+            if st.session_state.final_avoid_tolls
+            else comparison["with_tolls"]
+        )
+
+        show_full_route_preview_map(
             data["origin"],
             current_clients,
-            data["round_trip"],
-            st.session_state.final_avoid_tolls,
+            preview_route,
         )
-
-        for preview in preview_links:
-            label = (
-                "🗺️ VER ROTA NO GOOGLE MAPS"
-                if len(preview_links) == 1
-                else f"🗺️ VER ROTA NO GOOGLE MAPS — PARTE {preview['number']}"
-            )
-
-            st.link_button(
-                label,
-                preview["url"],
-                use_container_width=True,
-                type="primary",
-            )
-
-        if len(preview_links) > 1:
-            st.caption(
-                "A rota ultrapassa o limite de pontos de um único URL do Google Maps, "
-                "por isso a pré-visualização foi dividida apenas onde é necessário."
-            )
 
     else:
         st.warning(
