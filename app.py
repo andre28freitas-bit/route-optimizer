@@ -334,7 +334,6 @@ def optimize_route(
                         "label": client["original"],
                     }
                 ],
-                "penaltyCost": 1000000,
             }
         )
 
@@ -1170,6 +1169,14 @@ if st.button(
             st.error(
                 "A otimização não devolveu "
                 "nenhuma visita."
+            )
+            st.stop()
+
+        if len(ordered_clients) != len(clients):
+            st.error(
+                f"A otimização devolveu {len(ordered_clients)} de "
+                f"{len(clients)} clientes. A rota não será criada "
+                "enquanto não incluir todas as visitas."
             )
             st.stop()
 
