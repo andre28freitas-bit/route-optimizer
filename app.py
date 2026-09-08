@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 st.title("🚚 Route Optimizer")
-st.caption("Planeamento, revisão e geração de rotas para Google Maps")
+st.caption("Planeamento, validação e navegação de rotas")
 
 
 # =========================================================
@@ -46,12 +46,10 @@ def get_credentials():
         st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     )
 
-    credentials = service_account.Credentials.from_service_account_info(
+    return service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
-
-    return credentials
 
 
 def get_access_token():
@@ -77,9 +75,6 @@ def auth_headers():
 @st.cache_data(show_spinner=False)
 def geocode_address(address):
     address = address.strip()
-
-    if not address:
-        raise ValueError("Morada vazia.")
 
     encoded_address = quote(address, safe="")
 
@@ -109,8 +104,7 @@ def geocode_address(address):
             f"{response.status_code} - {response.text}"
         )
 
-    data = response.json()
-    results = data.get("results", [])
+    results = response.json().get("results", [])
 
     if not results:
         raise ValueError(
@@ -172,7 +166,7 @@ def format_duration(seconds):
 
 
 # =========================================================
-# OTIMIZAÇÃO
+# ROUTE OPTIMIZATION API
 # =========================================================
 
 def optimize_route(
@@ -234,8 +228,12 @@ def optimize_route(
         "model": {
             "shipments": shipments,
             "vehicles": [vehicle],
-            "globalStartTime": start_time.isoformat().replace("+00:00", "Z"),
-            "globalEndTime": end_time.isoformat().replace("+00:00", "Z"),
+            "globalStartTime": (
+                start_time.isoformat().replace("+00:00", "Z")
+            ),
+            "globalEndTime": (
+                end_time.isoformat().replace("+00:00", "Z")
+            ),
         },
     }
 
@@ -262,9 +260,10 @@ def optimize_route(
 
 def google_maps_url(
     origin,
-    stops,
+    waypoints,
     destination,
     avoid_tolls=True,
+    navigation=False,
 ):
     params = {
         "api": "1",
@@ -276,8 +275,11 @@ def google_maps_url(
     if avoid_tolls:
         params["avoid"] = "tolls"
 
-    if stops:
-        params["waypoints"] = "|".join(stops)
+    if waypoints:
+        params["waypoints"] = "|".join(waypoints)
+
+    if navigation:
+        params["dir_action"] = "navigate"
 
     return (
         "https://www.google.com/maps/dir/?"
@@ -285,7 +287,11 @@ def google_maps_url(
     )
 
 
-def build_maps_links(
+# =========================================================
+# PRÉ-VISUALIZAÇÃO
+# =========================================================
+
+def build_preview_links(
     origin,
     ordered_clients,
     round_trip,
@@ -294,54 +300,113 @@ def build_maps_links(
     if not ordered_clients:
         return []
 
-    all_points = [origin["formatted"]]
+    points = [origin["formatted"]]
 
-    all_points.extend(
+    points.extend(
         client["formatted"]
         for client in ordered_clients
     )
 
     if round_trip:
-        all_points.append(origin["formatted"])
+        points.append(origin["formatted"])
 
     links = []
 
-    max_points_per_segment = 11
+    # Preview pode usar mais pontos
+    max_points = 11
 
-    start_index = 0
-    segment_number = 1
+    start = 0
+    number = 1
 
-    while start_index < len(all_points) - 1:
-        segment_points = all_points[
-            start_index:
-            start_index + max_points_per_segment
-        ]
+    while start < len(points) - 1:
+        segment = points[start:start + max_points]
 
-        if len(segment_points) < 2:
+        if len(segment) < 2:
             break
 
-        segment_origin = segment_points[0]
-        segment_destination = segment_points[-1]
-        segment_waypoints = segment_points[1:-1]
-
         url = google_maps_url(
-            segment_origin,
-            segment_waypoints,
-            segment_destination,
+            origin=segment[0],
+            waypoints=segment[1:-1],
+            destination=segment[-1],
             avoid_tolls=avoid_tolls,
+            navigation=False,
         )
 
         links.append(
             {
-                "number": segment_number,
-                "origin": segment_origin,
-                "destination": segment_destination,
+                "number": number,
+                "origin": segment[0],
+                "destination": segment[-1],
                 "url": url,
             }
         )
 
-        start_index += len(segment_points) - 1
-        segment_number += 1
+        start += len(segment) - 1
+        number += 1
+
+    return links
+
+
+# =========================================================
+# LINKS DE NAVEGAÇÃO
+# =========================================================
+
+def build_navigation_links(
+    origin,
+    ordered_clients,
+    round_trip,
+    avoid_tolls,
+):
+    if not ordered_clients:
+        return []
+
+    points = [origin["formatted"]]
+
+    points.extend(
+        client["formatted"]
+        for client in ordered_clients
+    )
+
+    if round_trip:
+        points.append(origin["formatted"])
+
+    links = []
+
+    # Mobile:
+    # origem + 3 waypoints + destino
+    max_points = 5
+
+    start = 0
+    number = 1
+
+    while start < len(points) - 1:
+        segment = points[start:start + max_points]
+
+        if len(segment) < 2:
+            break
+
+        url = google_maps_url(
+            origin=segment[0],
+            waypoints=segment[1:-1],
+            destination=segment[-1],
+            avoid_tolls=avoid_tolls,
+            navigation=True,
+        )
+
+        links.append(
+            {
+                "number": number,
+                "origin": segment[0],
+                "destination": segment[-1],
+                "stops": len(segment) - 1,
+                "url": url,
+            }
+        )
+
+        # Último ponto deste segmento
+        # passa a origem do seguinte
+        start += len(segment) - 1
+        number += 1
 
     return links
 
@@ -381,6 +446,7 @@ with col_tolls:
 round_trip = mode == "Ida e volta"
 avoid_tolls = toll_mode.startswith("🚫")
 
+
 st.markdown("### Clientes")
 
 default_clients = """Matriz Auto Braga, R. Cidade do Porto 62, 4705-084 Braga
@@ -401,11 +467,17 @@ clients_input = st.text_area(
     height=280,
 )
 
+
+# =========================================================
+# OTIMIZAR
+# =========================================================
+
 if st.button(
     "🚀 Otimizar rota",
     type="primary",
     use_container_width=True,
 ):
+
     client_addresses = [
         line.strip()
         for line in clients_input.splitlines()
@@ -421,6 +493,7 @@ if st.button(
         st.stop()
 
     try:
+
         with st.spinner("A localizar a origem..."):
             origin = geocode_address(origin_input)
 
@@ -429,6 +502,7 @@ if st.button(
         progress = st.progress(0)
 
         for i, address in enumerate(client_addresses):
+
             clients.append(
                 geocode_address(address)
             )
@@ -440,6 +514,7 @@ if st.button(
         progress.empty()
 
         with st.spinner("A otimizar a rota..."):
+
             result = optimize_route(
                 origin,
                 clients,
@@ -460,9 +535,13 @@ if st.button(
         ordered_clients = []
 
         for visit in visits:
-            shipment_index = visit.get("shipmentIndex")
+
+            shipment_index = visit.get(
+                "shipmentIndex"
+            )
 
             if shipment_index is not None:
+
                 ordered_clients.append(
                     clients[shipment_index]
                 )
@@ -486,30 +565,45 @@ if st.button(
         st.rerun()
 
     except Exception as error:
+
         st.error("Ocorreu um erro.")
         st.code(str(error))
 
 
 # =========================================================
-# RESULTADO + PRÉ-VISUALIZAÇÃO
+# RESULTADO
 # =========================================================
 
 if st.session_state.route_data:
+
     data = st.session_state.route_data
 
     st.divider()
-    st.markdown("## 1. Resultado da otimização")
+
+    st.markdown(
+        "## 1. Resultado da otimização"
+    )
 
     route = data["route"]
-    metrics = route.get("metrics", {})
+
+    metrics = route.get(
+        "metrics",
+        {},
+    )
 
     total_km = (
-        metrics.get("travelDistanceMeters", 0)
+        metrics.get(
+            "travelDistanceMeters",
+            0,
+        )
         / 1000
     )
 
     total_time = duration_seconds(
-        metrics.get("travelDuration", "0s")
+        metrics.get(
+            "travelDuration",
+            "0s",
+        )
     )
 
     c1, c2, c3 = st.columns(3)
@@ -530,22 +624,27 @@ if st.session_state.route_data:
     )
 
     if data["avoid_tolls"]:
-        st.caption("🚫 Rota configurada para evitar portagens")
+
+        st.caption(
+            "🚫 Rota sem portagens"
+        )
+
     else:
-        st.caption("🛣️ Portagens permitidas")
+
+        st.caption(
+            "🛣️ Portagens permitidas"
+        )
+
 
     # =====================================================
-    # PRÉ-VISUALIZAÇÃO DA ROTA SUGERIDA
+    # PREVIEW
     # =====================================================
 
-    st.markdown("### 🗺️ Ver rota sugerida no Google Maps")
-
-    st.caption(
-        "Abre a rota sugerida para verificar visualmente "
-        "se a sequência de visitas faz sentido."
+    st.markdown(
+        "### 🗺️ Visualizar rota sugerida"
     )
 
-    preview_links = build_maps_links(
+    preview_links = build_preview_links(
         data["origin"],
         data["ordered_clients"],
         data["round_trip"],
@@ -553,30 +652,34 @@ if st.session_state.route_data:
     )
 
     for link in preview_links:
-        if len(preview_links) == 1:
-            button_text = "🗺️ Abrir rota sugerida no Google Maps"
-        else:
-            button_text = (
-                f"🗺️ Abrir rota sugerida "
-                f"{link['number']} no Google Maps"
-            )
+
+        text = (
+            "🗺️ Abrir rota sugerida no Google Maps"
+            if len(preview_links) == 1
+            else
+            f"🗺️ Ver rota sugerida {link['number']}"
+        )
 
         st.link_button(
-            button_text,
+            text,
             link["url"],
             use_container_width=True,
         )
 
+
     # =====================================================
-    # REVISÃO MANUAL
+    # REVISÃO
     # =====================================================
 
     st.divider()
-    st.markdown("## 2. Rever e ajustar a ordem")
+
+    st.markdown(
+        "## 2. Rever e ajustar"
+    )
 
     st.info(
-        "Se algum cliente estiver na posição errada, "
-        "altera o número da posição e aplica a nova ordem."
+        "Altera a posição de um cliente "
+        "caso a sequência sugerida não faça sentido."
     )
 
     ordered_names = (
@@ -589,11 +692,13 @@ if st.session_state.route_data:
         ordered_names,
         start=1,
     ):
+
         col1, col2 = st.columns(
             [1, 5]
         )
 
         with col1:
+
             new_position = st.number_input(
                 "Pos.",
                 min_value=1,
@@ -605,6 +710,7 @@ if st.session_state.route_data:
             )
 
         with col2:
+
             st.write(
                 f"**{i}. {client_name}**"
             )
@@ -617,10 +723,12 @@ if st.session_state.route_data:
             }
         )
 
+
     if st.button(
         "🔄 Aplicar nova ordem",
         use_container_width=True,
     ):
+
         edited_rows.sort(
             key=lambda x: (
                 x["position"],
@@ -637,8 +745,9 @@ if st.session_state.route_data:
 
         st.rerun()
 
+
     # =====================================================
-    # PRÉ-VISUALIZAÇÃO DA ORDEM AJUSTADA
+    # ORDEM ATUAL
     # =====================================================
 
     client_lookup = {
@@ -648,7 +757,8 @@ if st.session_state.route_data:
 
     current_clients = [
         client_lookup[name]
-        for name in st.session_state.manual_order
+        for name
+        in st.session_state.manual_order
     ]
 
     st.markdown("### Ordem atual")
@@ -657,44 +767,51 @@ if st.session_state.route_data:
         st.session_state.manual_order,
         start=1,
     ):
+
         st.write(
             f"**{i}.** {client_name}"
         )
 
-    adjusted_preview_links = build_maps_links(
+
+    # =====================================================
+    # PREVIEW APÓS AJUSTES
+    # =====================================================
+
+    adjusted_preview = build_preview_links(
         data["origin"],
         current_clients,
         data["round_trip"],
         data["avoid_tolls"],
     )
 
-    st.markdown("### 🗺️ Ver ordem atual no Google Maps")
+    st.markdown(
+        "### 🗺️ Visualizar ordem atual"
+    )
 
-    for link in adjusted_preview_links:
-        if len(adjusted_preview_links) == 1:
-            button_text = "🗺️ Pré-visualizar ordem atual"
-        else:
-            button_text = (
-                f"🗺️ Pré-visualizar ordem atual "
-                f"{link['number']}"
-            )
+    for link in adjusted_preview:
+
+        text = (
+            "🗺️ Abrir ordem atual no Google Maps"
+            if len(adjusted_preview) == 1
+            else
+            f"🗺️ Ver ordem atual {link['number']}"
+        )
 
         st.link_button(
-            button_text,
+            text,
             link["url"],
             use_container_width=True,
         )
+
 
     # =====================================================
     # VALIDAR
     # =====================================================
 
     st.divider()
-    st.markdown("## 3. Validar rota")
 
-    st.caption(
-        "Quando a sequência estiver correta, valida a rota "
-        "para gerar os links finais para o motorista."
+    st.markdown(
+        "## 3. Validar rota"
     )
 
     if st.button(
@@ -702,18 +819,21 @@ if st.session_state.route_data:
         type="primary",
         use_container_width=True,
     ):
+
         st.session_state.validated = True
+
         st.rerun()
 
 
 # =========================================================
-# LINKS FINAIS
+# LINKS FINAIS DE NAVEGAÇÃO
 # =========================================================
 
 if (
     st.session_state.route_data
     and st.session_state.validated
 ):
+
     data = st.session_state.route_data
 
     client_lookup = {
@@ -723,27 +843,35 @@ if (
 
     final_clients = [
         client_lookup[name]
-        for name in st.session_state.manual_order
+        for name
+        in st.session_state.manual_order
     ]
 
     st.divider()
-    st.markdown("## 4. Rota validada")
+
+    st.markdown(
+        "## 4. Links para o motorista"
+    )
 
     st.success(
         "✅ Rota validada. "
-        "Os links abaixo estão prontos para enviar ao motorista."
+        "Estes links estão preparados "
+        "para abrir a navegação no Google Maps."
     )
 
-    links = build_maps_links(
-        data["origin"],
-        final_clients,
-        data["round_trip"],
-        data["avoid_tolls"],
+    navigation_links = (
+        build_navigation_links(
+            data["origin"],
+            final_clients,
+            data["round_trip"],
+            data["avoid_tolls"],
+        )
     )
 
-    for link in links:
+    for link in navigation_links:
+
         st.markdown(
-            f"### 🗺️ Rota {link['number']}"
+            f"### 🚚 Parte {link['number']}"
         )
 
         st.caption(
@@ -752,7 +880,10 @@ if (
         )
 
         st.link_button(
-            f"📍 Abrir Rota {link['number']} no Google Maps",
+            (
+                f"▶️ Iniciar navegação "
+                f"— Parte {link['number']}"
+            ),
             link["url"],
             use_container_width=True,
             type="primary",
@@ -763,7 +894,9 @@ if (
             language=None,
         )
 
-    st.caption(
-        f"Foram gerados {len(links)} link(s) "
-        "para esta rota."
+    st.info(
+        f"Esta rota foi dividida em "
+        f"{len(navigation_links)} parte(s). "
+        "Quando terminar uma parte, "
+        "o motorista abre o link seguinte."
     )
