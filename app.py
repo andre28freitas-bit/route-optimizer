@@ -1,4 +1,6 @@
 import json
+import math
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
@@ -404,6 +406,186 @@ def optimize_route(
 
 
 # =========================================================
+# NATIONAL TOLL MATCHING
+# =========================================================
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0088
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dp / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    )
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _extract_motorways_from_steps(steps):
+    """Extract Portuguese motorway references such as A3, A4, A41 from Google instructions."""
+    roads = set()
+    for step in steps or []:
+        text = step.get("navigationInstruction", {}).get("instructions", "")
+        for match in re.finditer(r"(?<![A-Z0-9])A\s*[- ]?(\d{1,2})(?:\s*[-/]\s*(\d))?", text.upper()):
+            road = f"A{match.group(1)}"
+            if match.group(2):
+                road += f"-{match.group(2)}"
+            roads.add(road)
+    return roads
+
+
+@st.cache_data(ttl=86400 * 30, show_spinner=False)
+def geocode_toll_node(road, node_name):
+    """Geocode a toll-segment endpoint once and cache it for 30 days."""
+    candidates = [
+        f"{node_name}, {road}, Portugal",
+        f"{node_name}, Portugal",
+    ]
+    last_error = None
+    for candidate in candidates:
+        try:
+            return geocode_address(candidate)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Não foi possível localizar nó de portagem {road} / {node_name}: {last_error}")
+
+
+def _nearest_path_point(path, latitude, longitude):
+    best_index = None
+    best_distance = float("inf")
+    for i, point in enumerate(path):
+        lon, lat = point
+        d = _haversine_km(latitude, longitude, lat, lon)
+        if d < best_distance:
+            best_distance = d
+            best_index = i
+    return best_index, best_distance
+
+
+def _path_distance_between(path, start_i, end_i):
+    if start_i is None or end_i is None or not path:
+        return 0.0
+    a, b = sorted((start_i, end_i))
+    total = 0.0
+    for i in range(a, b):
+        lon1, lat1 = path[i]
+        lon2, lat2 = path[i + 1]
+        total += _haversine_km(lat1, lon1, lat2, lon2)
+    return total
+
+
+def estimate_tolls_from_national_base(route_json, vehicle_class=1):
+    """
+    Estimate Portuguese tolls by matching each Google route leg against the
+    official IMT 2026 tariff segments.
+
+    Google tells us which motorways are used in the navigation steps. We then
+    geocode only the endpoints of tariff segments on those motorways and check
+    whether the route actually crosses both endpoints in the correct corridor.
+    """
+    try:
+        segments, _ = get_national_toll_data()
+    except Exception as exc:
+        return {
+            "known": False,
+            "cost": 0.0,
+            "matched": [],
+            "roads": [],
+            "reason": f"Base nacional indisponível: {exc}",
+        }
+
+    by_road = {}
+    for segment in segments:
+        by_road.setdefault(segment.road.replace(" ", ""), []).append(segment)
+
+    total = 0.0
+    matched = []
+    roads_seen = set()
+
+    for leg_index, leg in enumerate(route_json.get("legs", []), start=1):
+        steps = leg.get("steps", [])
+        roads = _extract_motorways_from_steps(steps)
+        roads_seen.update(roads)
+
+        encoded = leg.get("polyline", {}).get("encodedPolyline", "")
+        path = decode_polyline(encoded)
+        if not path:
+            continue
+
+        # Only inspect tariff segments belonging to motorways Google says this leg uses.
+        for road in roads:
+            candidates = by_road.get(road, [])
+            if not candidates:
+                continue
+
+            for segment in candidates:
+                # A tariff row must have two real endpoints to be matchable.
+                if not segment.start or not segment.end:
+                    continue
+
+                try:
+                    start = geocode_toll_node(road, segment.start)
+                    end = geocode_toll_node(road, segment.end)
+                except Exception:
+                    continue
+
+                si, sd = _nearest_path_point(path, start["latitude"], start["longitude"])
+                ei, ed = _nearest_path_point(path, end["latitude"], end["longitude"])
+
+                # Junction/city labels are sometimes a few km from the motorway itself.
+                # 6 km is deliberately tolerant, while the distance check below prevents
+                # most false matches between unrelated nearby places.
+                if sd > 6.0 or ed > 6.0:
+                    continue
+
+                route_between = _path_distance_between(path, si, ei)
+                published_km = max(float(segment.km or 0), 0.1)
+
+                # The route between both endpoint areas should resemble the official
+                # length of the tolled section. Tolerance covers junction geometry and
+                # geocoding to town/exit centres rather than the exact gantry.
+                min_km = max(0.15, published_km * 0.35)
+                max_km = published_km * 2.4 + 4.0
+                if not (min_km <= route_between <= max_km):
+                    continue
+
+                price = segment.price(vehicle_class)
+                total += price
+                matched.append({
+                    "leg": leg_index,
+                    "road": road,
+                    "segment": segment.description,
+                    "price": price,
+                })
+
+    # Remove accidental duplicate matches within the same leg while preserving
+    # legitimate repeats on different legs (e.g. a round trip).
+    unique = []
+    seen = set()
+    corrected_total = 0.0
+    for item in matched:
+        key = (item["leg"], item["road"], item["segment"].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+        corrected_total += item["price"]
+
+    return {
+        "known": bool(unique) or not roads_seen,
+        "cost": round(corrected_total, 2),
+        "matched": unique,
+        "roads": sorted(roads_seen),
+        "reason": None if unique else (
+            "Não foi possível associar com segurança os lanços oficiais à rota."
+            if roads_seen else None
+        ),
+    }
+
+
+# =========================================================
 # ROUTES API
 # =========================================================
 
@@ -413,6 +595,7 @@ def compute_fixed_route(
     round_trip,
     avoid_tolls,
     emission_type,
+    toll_vehicle_class=1,
 ):
     if not ordered_clients:
         raise ValueError(
@@ -446,6 +629,7 @@ def compute_fixed_route(
         "extraComputations": ["TOLLS"],
         "languageCode": "pt-PT",
         "units": "METRIC",
+        "polylineQuality": "HIGH_QUALITY",
     }
 
     headers = auth_headers()
@@ -455,6 +639,8 @@ def compute_fixed_route(
         "routes.duration,"
         "routes.travelAdvisory.tollInfo,"
         "routes.legs.travelAdvisory.tollInfo,"
+        "routes.legs.polyline.encodedPolyline,"
+        "routes.legs.steps.navigationInstruction.instructions,"
         "routes.polyline.encodedPolyline"
     )
 
@@ -490,61 +676,57 @@ def compute_fixed_route(
 
     leg_toll_infos = []
     for leg in route.get("legs", []):
-        toll_info = (
-            leg
-            .get("travelAdvisory", {})
-            .get("tollInfo")
-        )
+        toll_info = leg.get("travelAdvisory", {}).get("tollInfo")
         if toll_info:
             leg_toll_infos.append(toll_info)
 
     toll_cost = 0.0
     toll_currency = "EUR"
-    contains_tolls = bool(route_toll_info or leg_toll_infos)
-    toll_known = True
+    contains_tolls = False
+    toll_known = False
+    toll_source = None
+    toll_segments = []
 
-    # Prefer the route-level estimate when Google provides it.
-    # If it is missing, sum the per-leg toll estimates instead.
-    route_prices = (
-        route_toll_info.get("estimatedPrice", [])
-        if route_toll_info
-        else []
-    )
-
+    # 1) Prefer Google's own monetary estimate when available.
+    route_prices = route_toll_info.get("estimatedPrice", []) if route_toll_info else []
     if route_prices:
-        toll_cost = sum(
-            money_to_float(price)
-            for price in route_prices
-        )
-        toll_currency = route_prices[0].get(
-            "currencyCode",
-            "EUR",
-        )
-    elif leg_toll_infos:
+        toll_cost = sum(money_to_float(price) for price in route_prices)
+        toll_currency = route_prices[0].get("currencyCode", "EUR")
+        contains_tolls = toll_cost > 0
+        toll_known = True
+        toll_source = "Google"
+    else:
         leg_prices = []
-        missing_leg_price = False
-
+        all_priced = bool(leg_toll_infos)
         for toll_info in leg_toll_infos:
             prices = toll_info.get("estimatedPrice", [])
-            if prices:
-                leg_prices.extend(prices)
-            else:
-                missing_leg_price = True
+            if not prices:
+                all_priced = False
+                break
+            leg_prices.extend(prices)
 
-        if leg_prices and not missing_leg_price:
-            toll_cost = sum(
-                money_to_float(price)
-                for price in leg_prices
-            )
-            toll_currency = leg_prices[0].get(
-                "currencyCode",
-                "EUR",
-            )
+        if leg_prices and all_priced:
+            toll_cost = sum(money_to_float(price) for price in leg_prices)
+            toll_currency = leg_prices[0].get("currencyCode", "EUR")
+            contains_tolls = toll_cost > 0
+            toll_known = True
+            toll_source = "Google"
+
+    # 2) Portugal fallback: official national tariff base + actual Google route.
+    # This is used whenever Google does not return a monetary toll estimate.
+    if not toll_known:
+        local_tolls = estimate_tolls_from_national_base(route, vehicle_class=toll_vehicle_class)
+        if local_tolls["known"]:
+            toll_cost = local_tolls["cost"]
+            toll_currency = "EUR"
+            contains_tolls = toll_cost > 0
+            toll_known = True
+            toll_source = "IMT 2026"
+            toll_segments = local_tolls["matched"]
         else:
-            toll_known = False
-    elif route_toll_info:
-        # Google indicates toll information exists, but did not return a price.
-        toll_known = False
+            contains_tolls = bool(route_toll_info or leg_toll_infos or local_tolls["roads"])
+            toll_source = "IMT 2026"
+            toll_segments = local_tolls["matched"]
 
     encoded_polyline = (
         route
@@ -561,6 +743,8 @@ def compute_fixed_route(
         "toll_known": toll_known,
         "toll_cost": toll_cost,
         "toll_currency": toll_currency,
+        "toll_source": toll_source,
+        "toll_segments": toll_segments,
         "avoid_tolls": avoid_tolls,
         "encoded_polyline": encoded_polyline,
         "path": decode_polyline(encoded_polyline),
@@ -616,6 +800,7 @@ def compare_routes(
     fuel_price,
     driver_hour_cost,
     emission_type,
+    toll_vehicle_class=1,
 ):
     with_tolls = compute_fixed_route(
         origin,
@@ -623,6 +808,7 @@ def compare_routes(
         round_trip,
         False,
         emission_type,
+        toll_vehicle_class,
     )
 
     without_tolls = compute_fixed_route(
@@ -631,6 +817,7 @@ def compare_routes(
         round_trip,
         True,
         emission_type,
+        toll_vehicle_class,
     )
 
     with_tolls = add_costs(
@@ -763,9 +950,9 @@ def build_navigation_links(
 
     links = []
 
-    # Conservador para mobile:
-    # localização atual + até 3 waypoints + destino
-    points_per_link = 4
+    # A navegação final é pensada para abrir diretamente na app Google Maps.
+    # Até 9 waypoints + destino por link.
+    points_per_link = 10
 
     index = 0
     number = 1
@@ -852,6 +1039,8 @@ def show_comparison_card(
                 "Portagens",
                 toll_text,
             )
+            if route.get("toll_known") and route.get("toll_source"):
+                st.caption(f"Fonte: {route['toll_source']}")
 
         col5, col6 = st.columns(2)
 
@@ -1014,6 +1203,13 @@ with st.expander(
         min_value=0.0,
         value=0.0,
         step=1.0,
+    )
+
+    toll_vehicle_class = st.selectbox(
+        "Classe de portagem",
+        [1, 2, 3, 4],
+        index=0,
+        help="Classe do veículo para aplicar as tarifas oficiais portuguesas.",
     )
 
     emission_label = st.selectbox(
@@ -1190,6 +1386,7 @@ if st.button(
                 fuel_price,
                 driver_hour_cost,
                 emission_type,
+                toll_vehicle_class,
             )
 
         st.session_state.route_data = {
@@ -1203,6 +1400,7 @@ if st.button(
                 driver_hour_cost
             ),
             "emission_type": emission_type,
+            "toll_vehicle_class": toll_vehicle_class,
         }
 
         st.session_state.manual_order = [
