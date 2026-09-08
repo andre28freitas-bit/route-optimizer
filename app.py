@@ -409,6 +409,11 @@ def optimize_route(
 # NATIONAL TOLL MATCHING
 # =========================================================
 
+IP_ROAD_LAYER_QUERY = (
+    "https://sigip.infraestruturasdeportugal.pt/pub/rest/services/"
+    "MOBILE_DRR/IPSIG_MOBILE_REDE_NOVO/MapServer/0/query"
+)
+
 
 def _haversine_km(lat1, lon1, lat2, lon2):
     r = 6371.0088
@@ -423,12 +428,22 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _norm_road_ref(value):
+    value = (value or "").upper().replace(" ", "")
+    m = re.search(r"A(\d{1,2})(?:[-/](\d))?", value)
+    if not m:
+        return ""
+    return f"A{m.group(1)}" + (f"-{m.group(2)}" if m.group(2) else "")
+
+
 def _extract_motorways_from_steps(steps):
-    """Extract Portuguese motorway references such as A3, A4, A41 from Google instructions."""
     roads = set()
     for step in steps or []:
         text = step.get("navigationInstruction", {}).get("instructions", "")
-        for match in re.finditer(r"(?<![A-Z0-9])A\s*[- ]?(\d{1,2})(?:\s*[-/]\s*(\d))?", text.upper()):
+        for match in re.finditer(
+            r"(?<![A-Z0-9])A\s*[- ]?(\d{1,2})(?:\s*[-/]\s*(\d))?",
+            text.upper(),
+        ):
             road = f"A{match.group(1)}"
             if match.group(2):
                 road += f"-{match.group(2)}"
@@ -436,152 +451,323 @@ def _extract_motorways_from_steps(steps):
     return roads
 
 
-@st.cache_data(ttl=86400 * 30, show_spinner=False)
-def geocode_toll_node(road, node_name):
-    """Geocode a toll-segment endpoint once and cache it for 30 days."""
-    candidates = [
-        f"{node_name}, {road}, Portugal",
-        f"{node_name}, Portugal",
-    ]
-    last_error = None
-    for candidate in candidates:
-        try:
-            return geocode_address(candidate)
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(f"Não foi possível localizar nó de portagem {road} / {node_name}: {last_error}")
-
-
-def _nearest_path_point(path, latitude, longitude):
-    best_index = None
-    best_distance = float("inf")
-    for i, point in enumerate(path):
-        lon, lat = point
-        d = _haversine_km(latitude, longitude, lat, lon)
-        if d < best_distance:
-            best_distance = d
-            best_index = i
-    return best_index, best_distance
-
-
-def _path_distance_between(path, start_i, end_i):
-    if start_i is None or end_i is None or not path:
-        return 0.0
-    a, b = sorted((start_i, end_i))
+def _path_length_km(path):
     total = 0.0
-    for i in range(a, b):
+    for i in range(len(path) - 1):
         lon1, lat1 = path[i]
         lon2, lat2 = path[i + 1]
         total += _haversine_km(lat1, lon1, lat2, lon2)
     return total
 
 
+def _bbox_for_path(path, pad=0.01):
+    lons = [p[0] for p in path]
+    lats = [p[1] for p in path]
+    return {
+        "xmin": min(lons) - pad,
+        "ymin": min(lats) - pad,
+        "xmax": max(lons) + pad,
+        "ymax": max(lats) + pad,
+        "spatialReference": {"wkid": 4326},
+    }
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _ip_toll_roads_for_bbox(xmin, ymin, xmax, ymax):
+    """Obtain official IP road geometries flagged as tolled in the route area."""
+    geometry = {
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "spatialReference": {"wkid": 4326},
+    }
+    params = {
+        "where": "portagem=0 AND estado_=2",
+        "outFields": "roadnumber,portagem,jurisdicao,gestao,estado_",
+        "geometry": json.dumps(geometry),
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnGeometry": "true",
+        "f": "geojson",
+        "resultRecordCount": "1000",
+    }
+    response = requests.get(IP_ROAD_LAYER_QUERY, params=params, timeout=20)
+    response.raise_for_status()
+    return response.json().get("features", [])
+
+
+def _point_segment_distance_km(lat, lon, lat1, lon1, lat2, lon2):
+    """Fast local projection distance from point to line segment, in km."""
+    mean_lat = math.radians((lat + lat1 + lat2) / 3.0)
+    kx = 111.320 * max(math.cos(mean_lat), 0.2)
+    ky = 110.574
+    px, py = lon * kx, lat * ky
+    ax, ay = lon1 * kx, lat1 * ky
+    bx, by = lon2 * kx, lat2 * ky
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    if denom <= 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / denom
+    t = max(0.0, min(1.0, t))
+    qx, qy = ax + t * dx, ay + t * dy
+    return math.hypot(px - qx, py - qy)
+
+
+def _feature_lines(feature):
+    geom = feature.get("geometry", {}) or {}
+    typ = geom.get("type")
+    coords = geom.get("coordinates", [])
+    if typ == "LineString":
+        return [coords]
+    if typ == "MultiLineString":
+        return coords
+    return []
+
+
+def _distance_to_feature_km(lat, lon, feature):
+    best = float("inf")
+    for line in _feature_lines(feature):
+        for i in range(len(line) - 1):
+            lon1, lat1 = line[i][:2]
+            lon2, lat2 = line[i + 1][:2]
+            d = _point_segment_distance_km(lat, lon, lat1, lon1, lat2, lon2)
+            if d < best:
+                best = d
+    return best
+
+
+def _detect_tolled_runs(path, max_distance_km=0.12):
+    """
+    Detect continuous portions of a Google route that lie on an official IP
+    road geometry marked as tolled. This avoids relying on navigation wording.
+    """
+    if len(path) < 2:
+        return []
+
+    bbox = _bbox_for_path(path)
+    try:
+        features = _ip_toll_roads_for_bbox(
+            round(bbox["xmin"], 4), round(bbox["ymin"], 4),
+            round(bbox["xmax"], 4), round(bbox["ymax"], 4),
+        )
+    except Exception:
+        return []
+
+    usable = []
+    for f in features:
+        road = _norm_road_ref((f.get("properties") or {}).get("roadnumber"))
+        if road and _feature_lines(f):
+            usable.append((road, f))
+
+    if not usable:
+        return []
+
+    # Classify each Google route segment using its midpoint.
+    classified = []
+    for i in range(len(path) - 1):
+        lon1, lat1 = path[i]
+        lon2, lat2 = path[i + 1]
+        seg_km = _haversine_km(lat1, lon1, lat2, lon2)
+        if seg_km <= 0:
+            continue
+        mid_lat = (lat1 + lat2) / 2
+        mid_lon = (lon1 + lon2) / 2
+
+        best_road = None
+        best_d = float("inf")
+        for road, feature in usable:
+            d = _distance_to_feature_km(mid_lat, mid_lon, feature)
+            if d < best_d:
+                best_d = d
+                best_road = road
+
+        classified.append((best_road if best_d <= max_distance_km else None, seg_km))
+
+    # Merge consecutive segments on the same tolled motorway. Small gaps caused
+    # by junction geometry are absorbed when they are under 500 m.
+    runs = []
+    current_road = None
+    current_km = 0.0
+    pending_gap = 0.0
+
+    for road, km in classified:
+        if road == current_road and road is not None:
+            current_km += pending_gap + km
+            pending_gap = 0.0
+        elif road is None and current_road is not None and pending_gap + km <= 0.5:
+            pending_gap += km
+        else:
+            if current_road and current_km >= 0.25:
+                runs.append({"road": current_road, "km": current_km})
+            current_road = road
+            current_km = km if road else 0.0
+            pending_gap = 0.0
+
+    if current_road and current_km >= 0.25:
+        runs.append({"road": current_road, "km": current_km})
+
+    return runs
+
+
+def _best_contiguous_tariff_sequence(candidates, target_km, vehicle_class):
+    """
+    Choose the contiguous official tariff sequence whose published distance is
+    closest to the actual tolled distance measured on the Google route.
+
+    It is intentionally conservative: if the match is poor we return None
+    instead of presenting a fabricated exact price.
+    """
+    candidates = [c for c in candidates if float(c.km or 0) > 0]
+    if not candidates or target_km <= 0:
+        return None
+
+    # Preserve official segment order. Segment numbers are usually numeric.
+    def order_key(seg):
+        m = re.match(r"(\d+)", str(seg.segment_no or ""))
+        return int(m.group(1)) if m else 9999
+
+    candidates = sorted(candidates, key=order_key)
+    best = None
+
+    for i in range(len(candidates)):
+        km_sum = 0.0
+        price_sum = 0.0
+        seq = []
+        for j in range(i, len(candidates)):
+            c = candidates[j]
+            km_sum += float(c.km or 0)
+            price_sum += c.price(vehicle_class)
+            seq.append(c)
+            error = abs(km_sum - target_km)
+            rel_error = error / max(target_km, 1.0)
+
+            score = rel_error + (0.002 * len(seq))
+            if best is None or score < best["score"]:
+                best = {
+                    "score": score,
+                    "error_km": error,
+                    "rel_error": rel_error,
+                    "km": km_sum,
+                    "price": price_sum,
+                    "segments": list(seq),
+                }
+
+            # Once far beyond the target there is no value in extending much more.
+            if km_sum > target_km * 1.35 + 4:
+                break
+
+    if not best:
+        return None
+
+    # Allow motorway/junction geometry differences but reject clearly ambiguous runs.
+    allowed_error = max(2.0, target_km * 0.18)
+    if best["error_km"] > allowed_error:
+        return None
+    return best
+
+
 def estimate_tolls_from_national_base(route_json, vehicle_class=1):
     """
-    Estimate Portuguese tolls by matching each Google route leg against the
-    official IMT 2026 tariff segments.
+    Portuguese toll estimator:
+      Google high-quality route geometry
+        -> official IP tolled-road geometry
+        -> actual tolled distance per motorway
+        -> closest contiguous sequence in the official IMT 2026 tariff table.
 
-    Google tells us which motorways are used in the navigation steps. We then
-    geocode only the endpoints of tariff segments on those motorways and check
-    whether the route actually crosses both endpoints in the correct corridor.
+    The result is marked as an estimate because the public IP layer identifies
+    tolled road geometry but not every toll-gate transaction directly.
     """
     try:
         segments, _ = get_national_toll_data()
     except Exception as exc:
         return {
-            "known": False,
-            "cost": 0.0,
-            "matched": [],
-            "roads": [],
+            "known": False, "cost": 0.0, "matched": [], "roads": [],
             "reason": f"Base nacional indisponível: {exc}",
         }
 
     by_road = {}
     for segment in segments:
-        by_road.setdefault(segment.road.replace(" ", ""), []).append(segment)
+        by_road.setdefault(_norm_road_ref(segment.road), []).append(segment)
 
     total = 0.0
     matched = []
     roads_seen = set()
+    any_unmatched_tolled_run = False
 
     for leg_index, leg in enumerate(route_json.get("legs", []), start=1):
-        steps = leg.get("steps", [])
-        roads = _extract_motorways_from_steps(steps)
-        roads_seen.update(roads)
-
         encoded = leg.get("polyline", {}).get("encodedPolyline", "")
         path = decode_polyline(encoded)
         if not path:
             continue
 
-        # Only inspect tariff segments belonging to motorways Google says this leg uses.
-        for road in roads:
+        runs = _detect_tolled_runs(path)
+
+        # Fallback road detection from Google instructions only for diagnostics.
+        if not runs:
+            roads_seen.update(_extract_motorways_from_steps(leg.get("steps", [])))
+            continue
+
+        for run in runs:
+            road = run["road"]
+            target_km = run["km"]
+            roads_seen.add(road)
             candidates = by_road.get(road, [])
             if not candidates:
-                continue
-
-            for segment in candidates:
-                # A tariff row must have two real endpoints to be matchable.
-                if not segment.start or not segment.end:
-                    continue
-
-                try:
-                    start = geocode_toll_node(road, segment.start)
-                    end = geocode_toll_node(road, segment.end)
-                except Exception:
-                    continue
-
-                si, sd = _nearest_path_point(path, start["latitude"], start["longitude"])
-                ei, ed = _nearest_path_point(path, end["latitude"], end["longitude"])
-
-                # Junction/city labels are sometimes a few km from the motorway itself.
-                # 6 km is deliberately tolerant, while the distance check below prevents
-                # most false matches between unrelated nearby places.
-                if sd > 6.0 or ed > 6.0:
-                    continue
-
-                route_between = _path_distance_between(path, si, ei)
-                published_km = max(float(segment.km or 0), 0.1)
-
-                # The route between both endpoint areas should resemble the official
-                # length of the tolled section. Tolerance covers junction geometry and
-                # geocoding to town/exit centres rather than the exact gantry.
-                min_km = max(0.15, published_km * 0.35)
-                max_km = published_km * 2.4 + 4.0
-                if not (min_km <= route_between <= max_km):
-                    continue
-
-                price = segment.price(vehicle_class)
-                total += price
+                any_unmatched_tolled_run = True
                 matched.append({
                     "leg": leg_index,
                     "road": road,
-                    "segment": segment.description,
-                    "price": price,
+                    "segment": f"Troço portajado detetado (~{target_km:.1f} km)",
+                    "price": None,
+                    "status": "sem tarifa correspondente na base",
                 })
+                continue
 
-    # Remove accidental duplicate matches within the same leg while preserving
-    # legitimate repeats on different legs (e.g. a round trip).
-    unique = []
-    seen = set()
-    corrected_total = 0.0
-    for item in matched:
-        key = (item["leg"], item["road"], item["segment"].casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-        corrected_total += item["price"]
+            best = _best_contiguous_tariff_sequence(candidates, target_km, vehicle_class)
+            if best is None:
+                any_unmatched_tolled_run = True
+                matched.append({
+                    "leg": leg_index,
+                    "road": road,
+                    "segment": f"Troço portajado detetado (~{target_km:.1f} km)",
+                    "price": None,
+                    "status": "matching ambíguo",
+                })
+                continue
+
+            total += best["price"]
+            matched.append({
+                "leg": leg_index,
+                "road": road,
+                "segment": " + ".join(s.description for s in best["segments"]),
+                "price": round(best["price"], 2),
+                "route_km": round(target_km, 1),
+                "tariff_km": round(best["km"], 1),
+                "status": "estimado por geometria IP + tabela IMT",
+            })
+
+    # If no official tolled road geometry intersects the route, a €0 result is valid.
+    if not matched:
+        return {
+            "known": True,
+            "cost": 0.0,
+            "matched": [],
+            "roads": sorted(roads_seen),
+            "reason": "Nenhum troço portajado detetado na geometria oficial IP.",
+            "estimated": False,
+        }
 
     return {
-        "known": bool(unique) or not roads_seen,
-        "cost": round(corrected_total, 2),
-        "matched": unique,
+        "known": not any_unmatched_tolled_run,
+        "cost": round(total, 2),
+        "matched": matched,
         "roads": sorted(roads_seen),
-        "reason": None if unique else (
-            "Não foi possível associar com segurança os lanços oficiais à rota."
-            if roads_seen else None
-        ),
+        "reason": None if not any_unmatched_tolled_run else "Há troços portajados sem matching seguro.",
+        "estimated": True,
     }
 
 
@@ -713,20 +899,36 @@ def compute_fixed_route(
             toll_source = "Google"
 
     # 2) Portugal fallback: official national tariff base + actual Google route.
-    # This is used whenever Google does not return a monetary toll estimate.
+    # IMPORTANT: do NOT apply the geometric fallback to an avoid-tolls route.
+    # The IP geometry can sit very close to parallel/local carriageways and can
+    # therefore create false-positive toll matches on a route that Google has
+    # deliberately calculated with avoidTolls=True. For that route we only
+    # accept explicit Google toll information; otherwise the toll cost is zero.
     if not toll_known:
-        local_tolls = estimate_tolls_from_national_base(route, vehicle_class=toll_vehicle_class)
-        if local_tolls["known"]:
-            toll_cost = local_tolls["cost"]
+        if avoid_tolls:
+            toll_cost = 0.0
             toll_currency = "EUR"
-            contains_tolls = toll_cost > 0
+            contains_tolls = False
             toll_known = True
-            toll_source = "IMT 2026"
-            toll_segments = local_tolls["matched"]
+            toll_source = None
+            toll_segments = []
         else:
-            contains_tolls = bool(route_toll_info or leg_toll_infos or local_tolls["roads"])
-            toll_source = "IMT 2026"
-            toll_segments = local_tolls["matched"]
+            local_tolls = estimate_tolls_from_national_base(
+                route, vehicle_class=toll_vehicle_class
+            )
+            if local_tolls["known"]:
+                toll_cost = local_tolls["cost"]
+                toll_currency = "EUR"
+                contains_tolls = toll_cost > 0
+                toll_known = True
+                toll_source = "IP + IMT 2026"
+                toll_segments = local_tolls["matched"]
+            else:
+                contains_tolls = bool(
+                    route_toll_info or leg_toll_infos or local_tolls["roads"]
+                )
+                toll_source = "IP + IMT 2026"
+                toll_segments = local_tolls["matched"]
 
     encoded_polyline = (
         route
