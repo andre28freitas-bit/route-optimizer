@@ -422,6 +422,7 @@ def compute_fixed_route(
         "routes.distanceMeters,"
         "routes.duration,"
         "routes.travelAdvisory.tollInfo,"
+        "routes.legs.travelAdvisory.tollInfo,"
         "routes.polyline.encodedPolyline"
     )
 
@@ -449,31 +450,69 @@ def compute_fixed_route(
 
     route = routes[0]
 
-    toll_info = (
+    route_toll_info = (
         route
         .get("travelAdvisory", {})
         .get("tollInfo")
     )
 
+    leg_toll_infos = []
+    for leg in route.get("legs", []):
+        toll_info = (
+            leg
+            .get("travelAdvisory", {})
+            .get("tollInfo")
+        )
+        if toll_info:
+            leg_toll_infos.append(toll_info)
+
     toll_cost = 0.0
     toll_currency = "EUR"
-    contains_tolls = bool(toll_info)
+    contains_tolls = bool(route_toll_info or leg_toll_infos)
     toll_known = True
 
-    if toll_info:
-        prices = toll_info.get("estimatedPrice", [])
+    # Prefer the route-level estimate when Google provides it.
+    # If it is missing, sum the per-leg toll estimates instead.
+    route_prices = (
+        route_toll_info.get("estimatedPrice", [])
+        if route_toll_info
+        else []
+    )
 
-        if prices:
+    if route_prices:
+        toll_cost = sum(
+            money_to_float(price)
+            for price in route_prices
+        )
+        toll_currency = route_prices[0].get(
+            "currencyCode",
+            "EUR",
+        )
+    elif leg_toll_infos:
+        leg_prices = []
+        missing_leg_price = False
+
+        for toll_info in leg_toll_infos:
+            prices = toll_info.get("estimatedPrice", [])
+            if prices:
+                leg_prices.extend(prices)
+            else:
+                missing_leg_price = True
+
+        if leg_prices and not missing_leg_price:
             toll_cost = sum(
                 money_to_float(price)
-                for price in prices
+                for price in leg_prices
             )
-            toll_currency = prices[0].get(
+            toll_currency = leg_prices[0].get(
                 "currencyCode",
                 "EUR",
             )
         else:
             toll_known = False
+    elif route_toll_info:
+        # Google indicates toll information exists, but did not return a price.
+        toll_known = False
 
     encoded_polyline = (
         route
