@@ -24,6 +24,7 @@ TOLL_RATE_PER_KM_BY_ROAD = {
 }
 
 DEFAULT_TOLL_RATE_PER_KM = 0.080
+TOLL_MODEL_VERSION = "v2-0.08"
 
 # Approximate ratios between Portuguese toll classes. We are estimating the
 # price after identifying the actual tolled kilometres, not reproducing a toll
