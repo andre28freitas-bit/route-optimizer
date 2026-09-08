@@ -733,7 +733,7 @@ def build_navigation_links(
 
     # Conservador para mobile:
     # localização atual + até 3 waypoints + destino
-    points_per_link = 4
+    points_per_link = 8
 
     index = 0
     number = 1
