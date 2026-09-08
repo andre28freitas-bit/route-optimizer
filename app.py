@@ -2,7 +2,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
-import pydeck as pdk
 import requests
 import streamlit as st
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -584,128 +583,6 @@ def compare_routes(
 
 
 # =========================================================
-# MAP PREVIEW
-# =========================================================
-
-def show_full_route_map(
-    origin,
-    ordered_clients,
-    route,
-    round_trip,
-):
-    path = route.get("path", [])
-
-    if not path:
-        st.warning(
-            "Não foi possível desenhar a rota no mapa."
-        )
-        return
-
-    stops = [
-        {
-            "longitude": origin["longitude"],
-            "latitude": origin["latitude"],
-            "label": "INÍCIO",
-            "order": "0",
-        }
-    ]
-
-    for index, client in enumerate(
-        ordered_clients,
-        start=1,
-    ):
-        stops.append(
-            {
-                "longitude": client["longitude"],
-                "latitude": client["latitude"],
-                "label": client["original"],
-                "order": str(index),
-            }
-        )
-
-    if round_trip:
-        stops.append(
-            {
-                "longitude": origin["longitude"],
-                "latitude": origin["latitude"],
-                "label": "REGRESSO",
-                "order": "↩",
-            }
-        )
-
-    avg_lon = sum(
-        point[0]
-        for point in path
-    ) / len(path)
-
-    avg_lat = sum(
-        point[1]
-        for point in path
-    ) / len(path)
-
-    route_layer = pdk.Layer(
-        "PathLayer",
-        data=[
-            {
-                "path": path
-            }
-        ],
-        get_path="path",
-        get_width=5,
-        width_min_pixels=3,
-        pickable=False,
-    )
-
-    stop_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=stops,
-        get_position="[longitude, latitude]",
-        get_radius=110,
-        radius_min_pixels=6,
-        radius_max_pixels=10,
-        pickable=True,
-    )
-
-    text_layer = pdk.Layer(
-        "TextLayer",
-        data=stops,
-        get_position="[longitude, latitude]",
-        get_text="order",
-        get_size=13,
-        get_alignment_baseline="'center'",
-        get_text_anchor="'middle'",
-        pickable=False,
-    )
-
-    deck = pdk.Deck(
-        map_style="road",
-        initial_view_state=pdk.ViewState(
-            longitude=avg_lon,
-            latitude=avg_lat,
-            zoom=9,
-            pitch=0,
-        ),
-        layers=[
-            route_layer,
-            stop_layer,
-            text_layer,
-        ],
-        tooltip={
-            "html": "<b>{order}</b><br/>{label}",
-            "style": {
-                "font-size": "13px",
-            },
-        },
-    )
-
-    st.pydeck_chart(
-        deck,
-        use_container_width=True,
-        height=520,
-    )
-
-
-# =========================================================
 # GOOGLE MAPS NAVIGATION LINKS
 # =========================================================
 
@@ -741,6 +618,57 @@ def google_maps_url(
             safe="|,",
         )
     )
+
+
+
+def build_preview_links(
+    origin,
+    ordered_clients,
+    round_trip,
+    avoid_tolls,
+):
+    """
+    Google Maps preview with the CURRENT order.
+    Google Maps URLs have waypoint limits, so larger routes are split
+    only when technically necessary.
+    """
+    if not ordered_clients:
+        return []
+
+    destinations = [client["formatted"] for client in ordered_clients]
+
+    if round_trip:
+        destinations.append(origin["formatted"])
+
+    # Explicit origin + up to 9 intermediate waypoints + destination.
+    # This is intended as a planning preview, not turn-by-turn navigation.
+    max_destinations_per_link = 10
+    links = []
+    cursor = 0
+    segment_origin = origin["formatted"]
+    part = 1
+
+    while cursor < len(destinations):
+        segment = destinations[cursor:cursor + max_destinations_per_link]
+
+        links.append(
+            {
+                "number": part,
+                "url": google_maps_url(
+                    origin=segment_origin,
+                    waypoints=segment[:-1],
+                    destination=segment[-1],
+                    avoid_tolls=avoid_tolls,
+                    navigation=False,
+                ),
+            }
+        )
+
+        segment_origin = segment[-1]
+        cursor += max_destinations_per_link
+        part += 1
+
+    return links
 
 
 def build_navigation_links(
@@ -1313,34 +1241,48 @@ if st.session_state.route_data:
     )
 
     if comparison_is_current:
-        selected_route = (
-            comparison["without_tolls"]
-            if st.session_state.final_avoid_tolls
-            else comparison["with_tolls"]
-        )
-
         st.markdown(
-            "## 🗺️ Pré-visualização da rota completa"
+            "## 🗺️ Ver ordem atual no Google Maps"
         )
 
         st.caption(
-            "Aqui vês todos os clientes, "
-            "pela ordem em que serão visitados, "
-            "antes de validares a rota."
+            "O Google Maps abre já com os pontos pela ordem atual. "
+            "Se quiseres mudar a sequência, volta à app, arrasta as visitas "
+            "e abre novamente o Google Maps."
         )
 
-        show_full_route_map(
+        preview_links = build_preview_links(
             data["origin"],
             current_clients,
-            selected_route,
             data["round_trip"],
+            st.session_state.final_avoid_tolls,
         )
+
+        for preview in preview_links:
+            label = (
+                "🗺️ VER ROTA NO GOOGLE MAPS"
+                if len(preview_links) == 1
+                else f"🗺️ VER ROTA NO GOOGLE MAPS — PARTE {preview['number']}"
+            )
+
+            st.link_button(
+                label,
+                preview["url"],
+                use_container_width=True,
+                type="primary",
+            )
+
+        if len(preview_links) > 1:
+            st.caption(
+                "A rota ultrapassa o limite de pontos de um único URL do Google Maps, "
+                "por isso a pré-visualização foi dividida apenas onde é necessário."
+            )
 
     else:
         st.warning(
             "Alteraste a ordem das visitas. "
-            "Recalcula a rota para atualizar "
-            "o mapa completo."
+            "Atualiza a rota para gerar um novo link do Google Maps "
+            "com esta sequência."
         )
 
     st.divider()
@@ -1403,7 +1345,7 @@ if st.session_state.route_data:
 
     if not comparison_is_current:
         if st.button(
-            "🔄 ATUALIZAR ROTA E PRÉ-VISUALIZAÇÃO",
+            "🔄 ATUALIZAR E VER NOVA ORDEM",
             type="primary",
             use_container_width=True,
         ):
@@ -1480,13 +1422,12 @@ if st.session_state.route_data:
         )
 
         st.caption(
-            "Valida apenas quando estiveres "
-            "satisfeito com a sequência "
-            "e com a rota completa no mapa."
+            "Cria o roteiro quando estiveres satisfeito com a ordem "
+            "que viste no Google Maps."
         )
 
         if st.button(
-            "✅ VALIDAR ROTA",
+            "✅ CRIAR ROTEIRO",
             type="primary",
             use_container_width=True,
         ):
