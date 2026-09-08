@@ -136,9 +136,38 @@ def get_project_id():
 # TOLL ESTIMATE
 # =========================================================
 
-# MVP business estimate: average Portuguese motorway toll cost per km.
-# This is deliberately presented as an estimate, not an official tariff.
-TOLL_ESTIMATE_PER_MOTORWAY_KM = 0.105
+# MVP business estimate by motorway/corridor (Class 1).
+# Factors are derived from 2026 official IMT tariff tables where available:
+# sum of Class 1 segment tolls / tolled kilometres. They remain estimates,
+# because Google route steps identify the motorway, not the exact toll gate.
+TOLL_RATE_PER_KM_BY_ROAD = {
+    "A1": 0.090,
+    "A2": 0.106,
+    "A3": 0.104,
+    "A4": 0.098,
+    "A5": 0.105,
+    "A6": 0.109,
+    "A8": 0.106,
+    "A9": 0.109,
+    "A10": 0.108,
+    "A12": 0.099,
+    "A13": 0.107,
+    "A14": 0.108,
+    "A15": 0.107,
+    "A17": 0.119,
+    "A21": 0.106,
+    "A32": 0.106,
+    "A41": 0.105,
+}
+
+# Roads whose tolls were abolished nationally (or on the relevant full
+# corridor) are treated as free. Roads with only partial exemptions are NOT
+# placed here, because a motorway-level detector cannot distinguish sections.
+FREE_MOTORWAYS_2026 = {"A22", "A23", "A24", "A25"}
+
+# Conservative fallback only when Google identifies an A-road for which we do
+# not yet have a specific factor.
+DEFAULT_TOLL_RATE_PER_KM = 0.105
 
 
 # =========================================================
@@ -521,14 +550,35 @@ def compute_fixed_route(
         toll_source = "Sem portagens (rota Google)"
         chargeable_motorway_km = 0.0
     else:
-        chargeable_motorway_km = motorway_km
-        toll_cost = chargeable_motorway_km * TOLL_ESTIMATE_PER_MOTORWAY_KM
+        toll_cost = 0.0
+        chargeable_motorway_km = 0.0
+        toll_breakdown = []
+
+        for road, km in motorway["by_road_km"].items():
+            if road in FREE_MOTORWAYS_2026:
+                rate = 0.0
+            else:
+                rate = TOLL_RATE_PER_KM_BY_ROAD.get(
+                    road, DEFAULT_TOLL_RATE_PER_KM
+                )
+
+            road_cost = km * rate
+            toll_cost += road_cost
+            if rate > 0:
+                chargeable_motorway_km += km
+
+            toll_breakdown.append(
+                f"{road}: {km:.1f} km × {rate:.3f} €/km"
+            )
+
         toll_known = True
-        contains_tolls = chargeable_motorway_km > 0
-        toll_source = (
-            f"Estimativa: {chargeable_motorway_km:.1f} km de autoestrada "
-            f"× {TOLL_ESTIMATE_PER_MOTORWAY_KM:.3f} €/km"
-        )
+        contains_tolls = toll_cost > 0
+        if toll_breakdown:
+            toll_source = "Estimativa por autoestrada: " + " · ".join(
+                toll_breakdown
+            )
+        else:
+            toll_source = "Sem autoestrada identificada na rota Google"
 
     encoded_polyline = (
         route.get("polyline", {}).get("encodedPolyline", "")
