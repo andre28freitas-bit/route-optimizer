@@ -10,7 +10,12 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 from streamlit_js_eval import get_geolocation
 from streamlit_sortables import sort_items
-from toll_estimator import estimate_portuguese_tolls, DEFAULT_TOLL_RATE_PER_KM, TOLL_MODEL_VERSION
+from toll_estimator import (
+    estimate_portuguese_tolls,
+    estimate_tolls_from_google_steps,
+    DEFAULT_TOLL_RATE_PER_KM,
+    TOLL_MODEL_VERSION,
+)
 
 
 # =========================================================
@@ -426,7 +431,9 @@ def compute_fixed_route(
     headers["X-Goog-FieldMask"] = (
         "routes.distanceMeters,"
         "routes.duration,"
-        "routes.polyline.encodedPolyline"
+        "routes.polyline.encodedPolyline,"
+        "routes.legs.steps.distanceMeters,"
+        "routes.legs.steps.navigationInstruction.instructions"
     )
     headers["X-Goog-User-Project"] = get_project_id()
 
@@ -452,6 +459,11 @@ def compute_fixed_route(
         route.get("polyline", {}).get("encodedPolyline", "")
     )
     route_path = decode_polyline(encoded_polyline)
+    route_steps = [
+        step
+        for leg in route.get("legs", [])
+        for step in leg.get("steps", [])
+    ]
 
     if avoid_tolls:
         toll_cost = 0.0
@@ -474,15 +486,20 @@ def compute_fixed_route(
             motorway_by_road_km = toll_estimate["by_road_km"]
             toll_source = toll_estimate["source"]
             contains_tolls = toll_cost > 0 or chargeable_motorway_km > 0
-        except Exception as exc:
-            # Não inventar €0 nem voltar ao antigo cálculo por todos os km de AE.
-            toll_cost = 0.0
-            toll_known = False
-            contains_tolls = True
-            chargeable_motorway_km = 0.0
-            motorway_km = 0.0
-            motorway_by_road_km = {}
-            toll_source = f"Estimativa indisponível: {exc}"
+        except Exception:
+            # Se a rede oficial IP estiver temporariamente indisponível,
+            # não bloqueamos a estimativa: usamos os steps da própria rota Google.
+            toll_estimate = estimate_tolls_from_google_steps(
+                route_steps,
+                vehicle_class=toll_vehicle_class,
+            )
+            toll_cost = toll_estimate["cost"]
+            toll_known = toll_estimate["known"]
+            chargeable_motorway_km = toll_estimate["tolled_km"]
+            motorway_km = chargeable_motorway_km
+            motorway_by_road_km = toll_estimate["by_road_km"]
+            toll_source = toll_estimate["source"]
+            contains_tolls = toll_cost > 0 or chargeable_motorway_km > 0
 
     return {
         "distance_km": route.get("distanceMeters", 0) / 1000,
