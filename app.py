@@ -808,7 +808,7 @@ def show_comparison_card(
                 toll_text,
             )
             if route.get("toll_known") and route.get("toll_source"):
-                st.caption(route["toll_source"])
+                st.caption("Custo estimado de portagens por cada km percorrido em AE: 0,08 €")
 
         col5, col6 = st.columns(2)
 
