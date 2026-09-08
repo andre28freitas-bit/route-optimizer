@@ -2,7 +2,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
-import pandas as pd
 import requests
 import streamlit as st
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -173,7 +172,7 @@ def format_duration(seconds):
 
 
 # =========================================================
-# OTIMIZAÇÃO AUTOMÁTICA
+# OTIMIZAÇÃO
 # =========================================================
 
 def optimize_route(
@@ -258,7 +257,7 @@ def optimize_route(
 
 
 # =========================================================
-# GOOGLE MAPS LINKS
+# GOOGLE MAPS
 # =========================================================
 
 def google_maps_url(
@@ -307,8 +306,6 @@ def build_maps_links(
 
     links = []
 
-    # Conservador para garantir boa compatibilidade.
-    # Cada bloco tem origem + até 9 waypoints + destino.
     max_points_per_segment = 11
 
     start_index = 0
@@ -432,13 +429,9 @@ if st.button(
         progress = st.progress(0)
 
         for i, address in enumerate(client_addresses):
-            with st.spinner(
-                f"A localizar cliente "
-                f"{i + 1}/{len(client_addresses)}..."
-            ):
-                clients.append(
-                    geocode_address(address)
-                )
+            clients.append(
+                geocode_address(address)
+            )
 
             progress.progress(
                 (i + 1) / len(client_addresses)
@@ -463,7 +456,6 @@ if st.button(
         route = routes[0]
 
         visits = route.get("visits", [])
-        transitions = route.get("transitions", [])
 
         ordered_clients = []
 
@@ -482,7 +474,6 @@ if st.button(
             "round_trip": round_trip,
             "avoid_tolls": avoid_tolls,
             "route": route,
-            "transitions": transitions,
         }
 
         st.session_state.manual_order = [
@@ -492,13 +483,15 @@ if st.button(
 
         st.session_state.validated = False
 
+        st.rerun()
+
     except Exception as error:
         st.error("Ocorreu um erro.")
         st.code(str(error))
 
 
 # =========================================================
-# REVISÃO
+# RESULTADO + PRÉ-VISUALIZAÇÃO
 # =========================================================
 
 if st.session_state.route_data:
@@ -541,11 +534,49 @@ if st.session_state.route_data:
     else:
         st.caption("🛣️ Portagens permitidas")
 
+    # =====================================================
+    # PRÉ-VISUALIZAÇÃO DA ROTA SUGERIDA
+    # =====================================================
+
+    st.markdown("### 🗺️ Ver rota sugerida no Google Maps")
+
+    st.caption(
+        "Abre a rota sugerida para verificar visualmente "
+        "se a sequência de visitas faz sentido."
+    )
+
+    preview_links = build_maps_links(
+        data["origin"],
+        data["ordered_clients"],
+        data["round_trip"],
+        data["avoid_tolls"],
+    )
+
+    for link in preview_links:
+        if len(preview_links) == 1:
+            button_text = "🗺️ Abrir rota sugerida no Google Maps"
+        else:
+            button_text = (
+                f"🗺️ Abrir rota sugerida "
+                f"{link['number']} no Google Maps"
+            )
+
+        st.link_button(
+            button_text,
+            link["url"],
+            use_container_width=True,
+        )
+
+    # =====================================================
+    # REVISÃO MANUAL
+    # =====================================================
+
+    st.divider()
     st.markdown("## 2. Rever e ajustar a ordem")
 
     st.info(
-        "Se a ordem não estiver correta, altera a posição "
-        "dos clientes abaixo. Só depois valida a rota."
+        "Se algum cliente estiver na posição errada, "
+        "altera o número da posição e aplica a nova ordem."
     )
 
     ordered_names = (
@@ -606,6 +637,20 @@ if st.session_state.route_data:
 
         st.rerun()
 
+    # =====================================================
+    # PRÉ-VISUALIZAÇÃO DA ORDEM AJUSTADA
+    # =====================================================
+
+    client_lookup = {
+        client["original"]: client
+        for client in data["clients"]
+    }
+
+    current_clients = [
+        client_lookup[name]
+        for name in st.session_state.manual_order
+    ]
+
     st.markdown("### Ordem atual")
 
     for i, client_name in enumerate(
@@ -616,9 +661,41 @@ if st.session_state.route_data:
             f"**{i}.** {client_name}"
         )
 
-    st.divider()
+    adjusted_preview_links = build_maps_links(
+        data["origin"],
+        current_clients,
+        data["round_trip"],
+        data["avoid_tolls"],
+    )
 
+    st.markdown("### 🗺️ Ver ordem atual no Google Maps")
+
+    for link in adjusted_preview_links:
+        if len(adjusted_preview_links) == 1:
+            button_text = "🗺️ Pré-visualizar ordem atual"
+        else:
+            button_text = (
+                f"🗺️ Pré-visualizar ordem atual "
+                f"{link['number']}"
+            )
+
+        st.link_button(
+            button_text,
+            link["url"],
+            use_container_width=True,
+        )
+
+    # =====================================================
+    # VALIDAR
+    # =====================================================
+
+    st.divider()
     st.markdown("## 3. Validar rota")
+
+    st.caption(
+        "Quando a sequência estiver correta, valida a rota "
+        "para gerar os links finais para o motorista."
+    )
 
     if st.button(
         "✅ VALIDAR ROTA",
@@ -654,7 +731,7 @@ if (
 
     st.success(
         "✅ Rota validada. "
-        "Os links abaixo já estão prontos para enviar."
+        "Os links abaixo estão prontos para enviar ao motorista."
     )
 
     links = build_maps_links(
