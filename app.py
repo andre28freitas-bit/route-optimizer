@@ -1,5 +1,6 @@
 import json
 import html
+import textwrap
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
@@ -26,7 +27,6 @@ st.set_page_config(
 # =========================================================
 # VENDEDORES
 # =========================================================
-# Depois trocamos isto pelos vendedores reais.
 
 SELLERS = {
     "Vendedor Teste": (
@@ -354,10 +354,8 @@ def duration_seconds(value):
         return 0
 
     if isinstance(value, str) and value.endswith("s"):
-
         try:
             return float(value[:-1])
-
         except ValueError:
             return 0
 
@@ -476,24 +474,15 @@ def optimize_route(
     }
 
     if round_trip:
-
-        vehicle["endWaypoint"] = (
-            waypoint(origin)
-        )
+        vehicle["endWaypoint"] = waypoint(origin)
 
     body = {
         "timeout": "30s",
-
-        "considerRoadTraffic":
-            True,
+        "considerRoadTraffic": True,
 
         "model": {
-
-            "shipments":
-                shipments,
-
-            "vehicles":
-                [vehicle],
+            "shipments": shipments,
+            "vehicles": [vehicle],
 
             "globalStartTime":
                 start_time
@@ -526,7 +515,7 @@ def optimize_route(
 
 
 # =========================================================
-# ROUTES API — COMPARAÇÃO DE CUSTOS
+# ROUTES API
 # =========================================================
 
 def compute_fixed_route(
@@ -542,63 +531,35 @@ def compute_fixed_route(
             "Não existem clientes para calcular a rota."
         )
 
-    # -----------------------------------------------------
-    # ROTA ABERTA
-    # origem -> clientes -> último cliente
-    # -----------------------------------------------------
-
     if not round_trip:
 
         destination = ordered_clients[-1]
-
-        intermediates = (
-            ordered_clients[:-1]
-        )
-
-    # -----------------------------------------------------
-    # IDA E VOLTA
-    # origem -> clientes -> origem
-    # -----------------------------------------------------
+        intermediates = ordered_clients[:-1]
 
     else:
 
         destination = origin
-
-        intermediates = (
-            ordered_clients
-        )
+        intermediates = ordered_clients
 
     body = {
-        "origin":
-            waypoint(origin),
-
-        "destination":
-            waypoint(destination),
+        "origin": waypoint(origin),
+        "destination": waypoint(destination),
 
         "intermediates": [
             waypoint(client)
             for client in intermediates
         ],
 
-        "travelMode":
-            "DRIVE",
-
-        "routingPreference":
-            "TRAFFIC_AWARE",
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE",
 
         "routeModifiers": {
-            "avoidTolls":
-                avoid_tolls,
-
-            "avoidHighways":
-                False,
-
-            "avoidFerries":
-                True,
+            "avoidTolls": avoid_tolls,
+            "avoidHighways": False,
+            "avoidFerries": True,
 
             "vehicleInfo": {
-                "emissionType":
-                    emission_type
+                "emissionType": emission_type
             },
         },
 
@@ -606,11 +567,8 @@ def compute_fixed_route(
             "TOLLS"
         ],
 
-        "languageCode":
-            "pt-PT",
-
-        "units":
-            "METRIC",
+        "languageCode": "pt-PT",
+        "units": "METRIC",
     }
 
     headers = auth_headers()
@@ -649,7 +607,6 @@ def compute_fixed_route(
     )
 
     if not routes:
-
         raise RuntimeError(
             "A Routes API não devolveu nenhuma rota."
         )
@@ -702,8 +659,6 @@ def compute_fixed_route(
 
         else:
 
-            # Google sabe que existem portagens,
-            # mas não tem estimativa de preço.
             toll_known = False
 
     return {
@@ -740,14 +695,8 @@ def add_operational_costs(
     driver_hour_cost,
 ):
 
-    distance_km = (
-        route["distance_km"]
-    )
-
-    duration_h = (
-        route["duration_s"]
-        / 3600
-    )
+    distance_km = route["distance_km"]
+    duration_h = route["duration_s"] / 3600
 
     fuel_litres = (
         distance_km
@@ -765,17 +714,9 @@ def add_operational_costs(
         * driver_hour_cost
     )
 
-    route["fuel_litres"] = (
-        fuel_litres
-    )
-
-    route["fuel_cost"] = (
-        fuel_cost
-    )
-
-    route["driver_cost"] = (
-        driver_cost
-    )
+    route["fuel_litres"] = fuel_litres
+    route["fuel_cost"] = fuel_cost
+    route["driver_cost"] = driver_cost
 
     if route["toll_known"]:
 
@@ -833,11 +774,8 @@ def compare_routes(
     )
 
     return {
-        "with_tolls":
-            with_tolls,
-
-        "without_tolls":
-            without_tolls,
+        "with_tolls": with_tolls,
+        "without_tolls": without_tolls,
     }
 
 
@@ -871,9 +809,7 @@ def google_maps_url(
         params["avoid"] = "tolls"
 
     if navigation:
-        params["dir_action"] = (
-            "navigate"
-        )
+        params["dir_action"] = "navigate"
 
     return (
         "https://www.google.com/maps/dir/?"
@@ -885,7 +821,7 @@ def google_maps_url(
 
 
 # =========================================================
-# PREVIEW GOOGLE MAPS
+# PREVIEW LINKS
 # =========================================================
 
 def build_preview_links(
@@ -914,8 +850,6 @@ def build_preview_links(
 
     links = []
 
-    # Desktop / preview:
-    # origem + 9 intermediários + destino
     max_points = 11
 
     start = 0
@@ -946,17 +880,14 @@ def build_preview_links(
             }
         )
 
-        start += (
-            len(segment) - 1
-        )
-
+        start += len(segment) - 1
         number += 1
 
     return links
 
 
 # =========================================================
-# LINKS FINAIS PARA MOTORISTA
+# NAVIGATION LINKS
 # =========================================================
 
 def build_navigation_links(
@@ -981,14 +912,6 @@ def build_navigation_links(
 
     links = []
 
-    # Mobile:
-    # até 3 waypoints intermédios
-    # + destino.
-    #
-    # A origem é deliberadamente omitida.
-    # O Google Maps usa a localização atual
-    # do motorista.
-
     points_per_link = 4
 
     index = 0
@@ -1004,13 +927,8 @@ def build_navigation_links(
         if not segment:
             break
 
-        destination = (
-            segment[-1]
-        )
-
-        intermediate = (
-            segment[:-1]
-        )
+        destination = segment[-1]
+        intermediate = segment[:-1]
 
         url = google_maps_url(
             origin=None,
@@ -1022,14 +940,9 @@ def build_navigation_links(
 
         links.append(
             {
-                "number":
-                    number,
-
-                "destination":
-                    destination,
-
-                "url":
-                    url,
+                "number": number,
+                "destination": destination,
+                "url": url,
             }
         )
 
@@ -1054,10 +967,7 @@ def comparison_card(
 
         if route["toll_known"]:
 
-            if (
-                route["toll_currency"]
-                == "EUR"
-            ):
+            if route["toll_currency"] == "EUR":
 
                 toll_text = euro(
                     route["toll_cost"]
@@ -1072,9 +982,7 @@ def comparison_card(
 
         else:
 
-            toll_text = (
-                "Preço indisponível"
-            )
+            toll_text = "Preço indisponível"
 
     total_text = "—"
 
@@ -1084,68 +992,70 @@ def comparison_card(
             route["total_cost"]
         )
 
-    st.markdown(
-        f"""
-        <div class="comparison-card">
+    card_html = f"""
+    <div class="comparison-card">
 
-            <div class="comparison-title">
-                {title}
-            </div>
+        <div class="comparison-title">
+            {title}
+        </div>
 
-            <div class="comparison-grid">
+        <div class="comparison-grid">
 
-                <div>
-                    <div class="comparison-label">
-                        DISTÂNCIA
-                    </div>
-                    <div class="comparison-value">
-                        {route["distance_km"]:.1f} km
-                    </div>
-                </div>
-
-                <div>
-                    <div class="comparison-label">
-                        TEMPO
-                    </div>
-                    <div class="comparison-value">
-                        {format_duration(route["duration_s"])}
-                    </div>
-                </div>
-
-                <div>
-                    <div class="comparison-label">
-                        COMBUSTÍVEL
-                    </div>
-                    <div class="comparison-value">
-                        {euro(route["fuel_cost"])}
-                    </div>
-                </div>
-
-                <div>
-                    <div class="comparison-label">
-                        PORTAGENS
-                    </div>
-                    <div class="comparison-value">
-                        {toll_text}
-                    </div>
-                </div>
-
-            </div>
-
-            <div class="cost-highlight">
-
+            <div>
                 <div class="comparison-label">
-                    CUSTO ESTIMADO TOTAL
+                    DISTÂNCIA
                 </div>
-
                 <div class="comparison-value">
-                    {total_text}
+                    {route["distance_km"]:.1f} km
                 </div>
+            </div>
 
+            <div>
+                <div class="comparison-label">
+                    TEMPO
+                </div>
+                <div class="comparison-value">
+                    {format_duration(route["duration_s"])}
+                </div>
+            </div>
+
+            <div>
+                <div class="comparison-label">
+                    COMBUSTÍVEL
+                </div>
+                <div class="comparison-value">
+                    {euro(route["fuel_cost"])}
+                </div>
+            </div>
+
+            <div>
+                <div class="comparison-label">
+                    PORTAGENS
+                </div>
+                <div class="comparison-value">
+                    {toll_text}
+                </div>
             </div>
 
         </div>
-        """,
+
+        <div class="cost-highlight">
+
+            <div class="comparison-label">
+                CUSTO ESTIMADO TOTAL
+            </div>
+
+            <div class="comparison-value">
+                {total_text}
+            </div>
+
+        </div>
+
+    </div>
+    """
+
+    st.markdown(
+        textwrap.dedent(card_html),
         unsafe_allow_html=True,
     )
 
@@ -1181,9 +1091,7 @@ start_mode = st.radio(
     ],
 )
 
-predefined_address = (
-    SELLERS[seller]
-)
+predefined_address = SELLERS[seller]
 
 if start_mode == "🏢 Base do vendedor":
 
@@ -1207,38 +1115,20 @@ else:
         if "error" in location:
 
             st.error(
-                "Não foi possível obter "
-                "a localização."
+                "Não foi possível obter a localização."
             )
 
         elif (
             location.get("coords")
-            and location["coords"].get(
-                "latitude"
-            )
-            is not None
+            and location["coords"].get("latitude") is not None
         ):
 
-            latitude = (
-                location["coords"][
-                    "latitude"
-                ]
-            )
+            latitude = location["coords"]["latitude"]
+            longitude = location["coords"]["longitude"]
 
-            longitude = (
-                location["coords"][
-                    "longitude"
-                ]
-            )
-
-            st.session_state[
-                "current_location"
-            ] = {
-                "latitude":
-                    latitude,
-
-                "longitude":
-                    longitude,
+            st.session_state["current_location"] = {
+                "latitude": latitude,
+                "longitude": longitude,
             }
 
             st.success(
@@ -1267,7 +1157,7 @@ round_trip = (
 
 
 # =========================================================
-# PREFERÊNCIA PARA A OTIMIZAÇÃO
+# PREFERÊNCIA DE OTIMIZAÇÃO
 # =========================================================
 
 st.markdown(
@@ -1347,11 +1237,9 @@ emission_map = {
     "Elétrico": "ELECTRIC",
 }
 
-emission_type = (
-    emission_map[
-        emission_label
-    ]
-)
+emission_type = emission_map[
+    emission_label
+]
 
 
 # =========================================================
@@ -1409,31 +1297,19 @@ if st.button(
 
     try:
 
-        # -------------------------------------------------
-        # ORIGEM
-        # -------------------------------------------------
-
-        if (
-            start_mode
-            == "🏢 Base do vendedor"
-        ):
+        if start_mode == "🏢 Base do vendedor":
 
             with st.spinner(
                 "A localizar ponto de partida..."
             ):
 
-                origin = (
-                    geocode_address(
-                        predefined_address
-                    )
+                origin = geocode_address(
+                    predefined_address
                 )
 
         else:
 
-            current = (
-                st.session_state
-                .current_location
-            )
+            current = st.session_state.current_location
 
             if not current:
 
@@ -1444,20 +1320,10 @@ if st.button(
 
                 st.stop()
 
-            origin = (
-                current_location_object(
-                    current[
-                        "latitude"
-                    ],
-                    current[
-                        "longitude"
-                    ],
-                )
+            origin = current_location_object(
+                current["latitude"],
+                current["longitude"],
             )
-
-        # -------------------------------------------------
-        # GEOCODING CLIENTES
-        # -------------------------------------------------
 
         clients = []
 
@@ -1468,9 +1334,7 @@ if st.button(
         ):
 
             clients.append(
-                geocode_address(
-                    address
-                )
+                geocode_address(address)
             )
 
             progress.progress(
@@ -1480,10 +1344,6 @@ if st.button(
 
         progress.empty()
 
-        # -------------------------------------------------
-        # ROUTE OPTIMIZATION
-        # -------------------------------------------------
-
         with st.spinner(
             "✨ A encontrar a melhor ordem de visitas..."
         ):
@@ -1492,8 +1352,7 @@ if st.button(
                 origin,
                 clients,
                 round_trip=round_trip,
-                avoid_tolls=
-                    optimization_avoid_tolls,
+                avoid_tolls=optimization_avoid_tolls,
             )
 
         routes = result.get(
@@ -1509,37 +1368,25 @@ if st.button(
 
             st.stop()
 
-        optimization_route = (
-            routes[0]
-        )
+        optimization_route = routes[0]
 
-        visits = (
-            optimization_route
-            .get(
-                "visits",
-                [],
-            )
+        visits = optimization_route.get(
+            "visits",
+            [],
         )
 
         ordered_clients = []
 
         for visit in visits:
 
-            shipment_index = (
-                visit.get(
-                    "shipmentIndex"
-                )
+            shipment_index = visit.get(
+                "shipmentIndex"
             )
 
-            if (
-                shipment_index
-                is not None
-            ):
+            if shipment_index is not None:
 
                 ordered_clients.append(
-                    clients[
-                        shipment_index
-                    ]
+                    clients[shipment_index]
                 )
 
         if not ordered_clients:
@@ -1550,65 +1397,34 @@ if st.button(
 
             st.stop()
 
-        # -------------------------------------------------
-        # ROUTES API — COMPARAÇÃO
-        # -------------------------------------------------
-
         with st.spinner(
             "💶 A comparar com e sem portagens..."
         ):
 
             comparison = compare_routes(
                 origin=origin,
-                ordered_clients=
-                    ordered_clients,
-                round_trip=
-                    round_trip,
-                consumption=
-                    consumption,
-                fuel_price=
-                    fuel_price,
-                driver_hour_cost=
-                    driver_hour_cost,
-                emission_type=
-                    emission_type,
+                ordered_clients=ordered_clients,
+                round_trip=round_trip,
+                consumption=consumption,
+                fuel_price=fuel_price,
+                driver_hour_cost=driver_hour_cost,
+                emission_type=emission_type,
             )
 
-        # -------------------------------------------------
-        # GUARDAR ESTADO
-        # -------------------------------------------------
-
         st.session_state.route_data = {
-            "seller":
-                seller,
-
-            "origin":
-                origin,
-
-            "clients":
-                clients,
-
-            "ordered_clients":
-                ordered_clients,
-
-            "round_trip":
-                round_trip,
-
+            "seller": seller,
+            "origin": origin,
+            "clients": clients,
+            "ordered_clients": ordered_clients,
+            "round_trip": round_trip,
             "optimization_avoid_tolls":
                 optimization_avoid_tolls,
-
             "optimization_route":
                 optimization_route,
-
-            "consumption":
-                consumption,
-
-            "fuel_price":
-                fuel_price,
-
+            "consumption": consumption,
+            "fuel_price": fuel_price,
             "driver_hour_cost":
                 driver_hour_cost,
-
             "emission_type":
                 emission_type,
         }
@@ -1623,17 +1439,14 @@ if st.button(
         )
 
         st.session_state.comparison_order = (
-            st.session_state
-            .manual_order.copy()
+            st.session_state.manual_order.copy()
         )
 
         st.session_state.final_avoid_tolls = (
             optimization_avoid_tolls
         )
 
-        st.session_state.validated = (
-            False
-        )
+        st.session_state.validated = False
 
         st.rerun()
 
@@ -1649,28 +1462,22 @@ if st.button(
 
 
 # =========================================================
-# RESULTADO
+# RESULTADOS
 # =========================================================
 
 if st.session_state.route_data:
 
-    data = (
-        st.session_state
-        .route_data
-    )
+    data = st.session_state.route_data
 
     client_lookup = {
         client["original"]:
             client
-        for client
-        in data["clients"]
+        for client in data["clients"]
     }
 
     current_clients = [
         client_lookup[name]
-        for name
-        in st.session_state
-        .manual_order
+        for name in st.session_state.manual_order
     ]
 
     st.divider()
@@ -1684,20 +1491,11 @@ if st.session_state.route_data:
         f"{len(current_clients)} clientes"
     )
 
-    # =====================================================
-    # COMPARAÇÃO
-    # =====================================================
-
-    comparison = (
-        st.session_state
-        .route_comparison
-    )
+    comparison = st.session_state.route_comparison
 
     comparison_up_to_date = (
-        st.session_state
-        .comparison_order
-        == st.session_state
-        .manual_order
+        st.session_state.comparison_order
+        == st.session_state.manual_order
     )
 
     if comparison:
@@ -1707,39 +1505,21 @@ if st.session_state.route_data:
         )
 
         st.caption(
-            "Comparação para a mesma ordem "
-            "de visitas."
+            "Comparação para a mesma ordem de visitas."
         )
 
         comparison_card(
             "🛣️ Portagens permitidas",
-            comparison[
-                "with_tolls"
-            ],
+            comparison["with_tolls"],
         )
 
         comparison_card(
             "🚫 Evitar portagens",
-            comparison[
-                "without_tolls"
-            ],
+            comparison["without_tolls"],
         )
 
-        route_a = (
-            comparison[
-                "with_tolls"
-            ]
-        )
-
-        route_b = (
-            comparison[
-                "without_tolls"
-            ]
-        )
-
-        # -------------------------------------------------
-        # DIFERENÇAS
-        # -------------------------------------------------
+        route_a = comparison["with_tolls"]
+        route_b = comparison["without_tolls"]
 
         time_diff = (
             route_b["duration_s"]
@@ -1792,19 +1572,13 @@ if st.session_state.route_data:
                 )
 
         if (
-            route_a["total_cost"]
-            is not None
-            and route_b["total_cost"]
-            is not None
+            route_a["total_cost"] is not None
+            and route_b["total_cost"] is not None
         ):
 
             cost_diff = (
-                route_b[
-                    "total_cost"
-                ]
-                - route_a[
-                    "total_cost"
-                ]
+                route_b["total_cost"]
+                - route_a["total_cost"]
             )
 
             if cost_diff < -0.01:
@@ -1839,13 +1613,8 @@ if st.session_state.route_data:
             st.warning(
                 "⚠️ A Google identificou portagens "
                 "na rota, mas não conseguiu devolver "
-                "um preço estimado. O custo total "
-                "dessa alternativa não é apresentado."
+                "um preço estimado."
             )
-
-    # =====================================================
-    # ESCOLHER ROTA
-    # =====================================================
 
     st.markdown(
         "### Qual queres usar?"
@@ -1853,8 +1622,7 @@ if st.session_state.route_data:
 
     default_index = (
         1
-        if st.session_state
-        .final_avoid_tolls
+        if st.session_state.final_avoid_tolls
         else 0
     )
 
@@ -1872,23 +1640,16 @@ if st.session_state.route_data:
         == "🚫 Evitar portagens"
     )
 
-    # =====================================================
-    # PREVIEW
-    # =====================================================
-
     preview_links = build_preview_links(
         data["origin"],
         current_clients,
         data["round_trip"],
-        st.session_state
-        .final_avoid_tolls,
+        st.session_state.final_avoid_tolls,
     )
 
     for link in preview_links:
 
-        text = (
-            "🗺️ VER ROTA NO GOOGLE MAPS"
-        )
+        text = "🗺️ VER ROTA NO GOOGLE MAPS"
 
         if len(preview_links) > 1:
 
@@ -1903,10 +1664,6 @@ if st.session_state.route_data:
             link["url"],
             use_container_width=True,
         )
-
-    # =====================================================
-    # DRAG & DROP
-    # =====================================================
 
     st.divider()
 
@@ -1923,8 +1680,7 @@ if st.session_state.route_data:
     drag_lookup = {}
 
     for index, client_name in enumerate(
-        st.session_state
-        .manual_order,
+        st.session_state.manual_order,
         start=1,
     ):
 
@@ -1954,10 +1710,6 @@ if st.session_state.route_data:
         cursor: grab;
         line-height: 1.35;
     }
-
-    .sortable-item:hover {
-        background: rgba(128,128,128,0.13);
-    }
     """
 
     sorted_display = sort_items(
@@ -1975,32 +1727,23 @@ if st.session_state.route_data:
 
         if (
             new_order
-            != st.session_state
-            .manual_order
+            != st.session_state.manual_order
         ):
 
-            st.session_state[
-                "manual_order"
-            ] = new_order
-
-            st.session_state[
-                "validated"
-            ] = False
-
-            comparison_up_to_date = (
-                False
+            st.session_state.manual_order = (
+                new_order
             )
 
-    # =====================================================
-    # SE ALTEROU MANUALMENTE
-    # =====================================================
+            st.session_state.validated = False
+
+            comparison_up_to_date = False
 
     if not comparison_up_to_date:
 
         st.warning(
             "↕️ Alteraste a ordem das visitas. "
-            "A comparação de custos acima ainda "
-            "corresponde à ordem anterior."
+            "A comparação acima ainda corresponde "
+            "à ordem anterior."
         )
 
         if st.button(
@@ -2013,8 +1756,7 @@ if st.session_state.route_data:
                 current_clients = [
                     client_lookup[name]
                     for name
-                    in st.session_state
-                    .manual_order
+                    in st.session_state.manual_order
                 ]
 
                 with st.spinner(
@@ -2022,39 +1764,23 @@ if st.session_state.route_data:
                 ):
 
                     comparison = compare_routes(
-                        origin=
-                            data["origin"],
-
-                        ordered_clients=
-                            current_clients,
-
-                        round_trip=
-                            data["round_trip"],
-
-                        consumption=
-                            data["consumption"],
-
-                        fuel_price=
-                            data["fuel_price"],
-
+                        origin=data["origin"],
+                        ordered_clients=current_clients,
+                        round_trip=data["round_trip"],
+                        consumption=data["consumption"],
+                        fuel_price=data["fuel_price"],
                         driver_hour_cost=
-                            data[
-                                "driver_hour_cost"
-                            ],
-
+                            data["driver_hour_cost"],
                         emission_type=
                             data["emission_type"],
                     )
 
-                st.session_state[
-                    "route_comparison"
-                ] = comparison
+                st.session_state.route_comparison = (
+                    comparison
+                )
 
-                st.session_state[
-                    "comparison_order"
-                ] = (
-                    st.session_state
-                    .manual_order.copy()
+                st.session_state.comparison_order = (
+                    st.session_state.manual_order.copy()
                 )
 
                 st.rerun()
@@ -2069,15 +1795,9 @@ if st.session_state.route_data:
                     str(error)
                 )
 
-    # =====================================================
-    # ORDEM ATUAL
-    # =====================================================
-
     current_clients = [
         client_lookup[name]
-        for name
-        in st.session_state
-        .manual_order
+        for name in st.session_state.manual_order
     ]
 
     st.markdown(
@@ -2093,30 +1813,27 @@ if st.session_state.route_data:
             client["original"]
         )
 
-        st.markdown(
-            f"""
-            <div class="route-card">
-                <div class="route-number">
-                    PARAGEM {index}
-                </div>
-                <div class="route-address">
-                    {safe_address}
-                </div>
+        route_card_html = f"""
+        <div class="route-card">
+            <div class="route-number">
+                PARAGEM {index}
             </div>
-            """,
+            <div class="route-address">
+                {safe_address}
+            </div>
+        </div>
+        """
+
+        st.markdown(
+            textwrap.dedent(route_card_html),
             unsafe_allow_html=True,
         )
-
-    # =====================================================
-    # PREVIEW ORDEM ATUAL
-    # =====================================================
 
     current_preview = build_preview_links(
         data["origin"],
         current_clients,
         data["round_trip"],
-        st.session_state
-        .final_avoid_tolls,
+        st.session_state.final_avoid_tolls,
     )
 
     for link in current_preview:
@@ -2138,17 +1855,11 @@ if st.session_state.route_data:
             use_container_width=True,
         )
 
-    # =====================================================
-    # VALIDAR
-    # =====================================================
-
     st.divider()
 
     comparison_is_current = (
-        st.session_state
-        .comparison_order
-        == st.session_state
-        .manual_order
+        st.session_state.comparison_order
+        == st.session_state.manual_order
     )
 
     if not comparison_is_current:
@@ -2166,10 +1877,7 @@ if st.session_state.route_data:
             use_container_width=True,
         ):
 
-            st.session_state[
-                "validated"
-            ] = True
-
+            st.session_state.validated = True
             st.rerun()
 
 
@@ -2182,23 +1890,17 @@ if (
     and st.session_state.validated
 ):
 
-    data = (
-        st.session_state
-        .route_data
-    )
+    data = st.session_state.route_data
 
     client_lookup = {
         client["original"]:
             client
-        for client
-        in data["clients"]
+        for client in data["clients"]
     }
 
     final_clients = [
         client_lookup[name]
-        for name
-        in st.session_state
-        .manual_order
+        for name in st.session_state.manual_order
     ]
 
     st.divider()
@@ -2211,10 +1913,7 @@ if (
         "Rota validada e pronta para enviar."
     )
 
-    if (
-        st.session_state
-        .final_avoid_tolls
-    ):
+    if st.session_state.final_avoid_tolls:
 
         st.caption(
             "🚫 Navegação configurada "
@@ -2228,21 +1927,17 @@ if (
             "portagens permitidas."
         )
 
-    navigation_links = (
-        build_navigation_links(
-            final_clients,
-            data["round_trip"],
-            data["origin"],
-            st.session_state
-            .final_avoid_tolls,
-        )
+    navigation_links = build_navigation_links(
+        final_clients,
+        data["round_trip"],
+        data["origin"],
+        st.session_state.final_avoid_tolls,
     )
 
     for link in navigation_links:
 
         st.markdown(
-            f"### 🚚 Parte "
-            f"{link['number']}"
+            f"### 🚚 Parte {link['number']}"
         )
 
         st.caption(
