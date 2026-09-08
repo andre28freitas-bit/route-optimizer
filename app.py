@@ -78,7 +78,7 @@ st.markdown(
 # =========================================================
 
 SELLERS = {
-    "Vendedor Teste": (
+    "Martins": (
         "Minho Jantes, Rua Da Tomada 13, "
         "4730-325 Oleiros, Vila Verde"
     ),
@@ -1040,17 +1040,15 @@ emission_type = (
 
 st.markdown("### 📋 Clientes")
 
-default_clients = """Matriz Auto Braga, R. Cidade do Porto 62, 4705-084 Braga
-Braga Retail Park, Loja K, Lugar De Passos E Lameiras, 4710-426 Braga
-Centro Comercial Nova Arcada, Avenida De Lamas 100 Loja R 05.A, 4700-068 Braga
-Av. Antonio Sergio 508, 4730-709 Vila Verde
-C.C. Minho Center 59, Av. Robert Smith - Fraião, 4715-249 Braga
-Centro Empresarial de Braga, Largo da Misericordia, Pav W2/W3, 4705-319 Braga
-Tesla Center Porto, Av. Fontes Pereira de Melo 318, 4100-259 Porto
-Av. da Independência 1 1C, 4705-162 Braga
-Travessa Marceliano de Araújo 49, Ferreiros, 4705-101 Braga
-Av. Barros e Soares 130, 4715-214 Braga
-BMcar Braga, N101, 4715-213 Braga"""
+default_clients = """Intermarché, Ponte de Lima
+Estação Viana Shopping, Viana do Castelo
+Continente Modelo, Barcelos
+Continente Modelo, Vila Nova de Famalicão
+GuimarãeShopping, Guimarães
+Continente Modelo, Fafe
+Continente Modelo, Felgueiras
+Continente Modelo, Penafiel
+Parque Nascente, Rio Tinto"""
 
 clients_input = st.text_area(
     "Uma morada por linha",
