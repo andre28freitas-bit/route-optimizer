@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import pandas as pd
 import requests
@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🚚 Route Optimizer")
-st.caption("Planeamento e navegação de rotas com Google Maps")
+st.caption("Planeamento, revisão e geração de rotas para Google Maps")
 
 
 # =========================================================
@@ -30,11 +30,11 @@ st.caption("Planeamento e navegação de rotas com Google Maps")
 if "route_data" not in st.session_state:
     st.session_state.route_data = None
 
-if "navigation_active" not in st.session_state:
-    st.session_state.navigation_active = False
+if "validated" not in st.session_state:
+    st.session_state.validated = False
 
-if "nav_index" not in st.session_state:
-    st.session_state.nav_index = 0
+if "manual_order" not in st.session_state:
+    st.session_state.manual_order = None
 
 
 # =========================================================
@@ -47,13 +47,9 @@ def get_credentials():
         st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     )
 
-    credentials = (
-        service_account.Credentials.from_service_account_info(
-            info,
-            scopes=[
-                "https://www.googleapis.com/auth/cloud-platform"
-            ],
-        )
+    credentials = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
 
     return credentials
@@ -85,8 +81,6 @@ def geocode_address(address):
 
     if not address:
         raise ValueError("Morada vazia.")
-
-    from urllib.parse import quote
 
     encoded_address = quote(address, safe="")
 
@@ -139,7 +133,7 @@ def geocode_address(address):
 
 
 # =========================================================
-# ROUTE OPTIMIZATION
+# HELPERS
 # =========================================================
 
 def waypoint(location):
@@ -153,10 +147,40 @@ def waypoint(location):
     }
 
 
+def duration_seconds(value):
+    if not value:
+        return 0
+
+    if isinstance(value, str) and value.endswith("s"):
+        try:
+            return float(value[:-1])
+        except ValueError:
+            return 0
+
+    return 0
+
+
+def format_duration(seconds):
+    seconds = int(round(seconds))
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+
+    return f"{minutes} min"
+
+
+# =========================================================
+# OTIMIZAÇÃO AUTOMÁTICA
+# =========================================================
+
 def optimize_route(
     origin,
     clients,
     round_trip=False,
+    avoid_tolls=True,
 ):
     info = json.loads(
         st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
@@ -195,7 +219,7 @@ def optimize_route(
         "startWaypoint": waypoint(origin),
         "travelMode": "DRIVING",
         "routeModifiers": {
-            "avoidTolls": True,
+            "avoidTolls": avoid_tolls,
             "avoidHighways": False,
             "avoidFerries": True,
         },
@@ -211,16 +235,8 @@ def optimize_route(
         "model": {
             "shipments": shipments,
             "vehicles": [vehicle],
-            "globalStartTime": (
-                start_time
-                .isoformat()
-                .replace("+00:00", "Z")
-            ),
-            "globalEndTime": (
-                end_time
-                .isoformat()
-                .replace("+00:00", "Z")
-            ),
+            "globalStartTime": start_time.isoformat().replace("+00:00", "Z"),
+            "globalEndTime": end_time.isoformat().replace("+00:00", "Z"),
         },
     }
 
@@ -233,7 +249,7 @@ def optimize_route(
 
     if response.status_code != 200:
         raise RuntimeError(
-            "Erro Route Optimization API:\n\n"
+            f"Erro Route Optimization API:\n\n"
             f"{response.status_code}\n"
             f"{response.text}"
         )
@@ -242,271 +258,99 @@ def optimize_route(
 
 
 # =========================================================
-# HELPERS
+# GOOGLE MAPS LINKS
 # =========================================================
 
-def duration_seconds(value):
-    if not value:
-        return 0
-
-    if (
-        isinstance(value, str)
-        and value.endswith("s")
-    ):
-        try:
-            return float(value[:-1])
-        except ValueError:
-            return 0
-
-    return 0
-
-
-def format_duration(seconds):
-    seconds = int(round(seconds))
-
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-
-    if hours:
-        return f"{hours} h {minutes:02d} min"
-
-    return f"{minutes} min"
-
-
-def navigation_url(location):
-    """
-    Abre o Google Maps usando a localização atual
-    do motorista como origem.
-    """
-
+def google_maps_url(
+    origin,
+    stops,
+    destination,
+    avoid_tolls=True,
+):
     params = {
         "api": "1",
-        "destination": location["formatted"],
+        "origin": origin,
+        "destination": destination,
         "travelmode": "driving",
-        "avoid": "tolls",
-        "dir_action": "navigate",
     }
 
-    if location.get("place_id"):
-        params["destination_place_id"] = (
-            location["place_id"]
-        )
+    if avoid_tolls:
+        params["avoid"] = "tolls"
+
+    if stops:
+        params["waypoints"] = "|".join(stops)
 
     return (
         "https://www.google.com/maps/dir/?"
-        + urlencode(params)
+        + urlencode(params, safe="|,")
     )
 
 
-def full_route_url(
+def build_maps_links(
     origin,
     ordered_clients,
     round_trip,
+    avoid_tolls,
 ):
     if not ordered_clients:
-        return None
+        return []
 
-    if round_trip:
-        destination = origin
-        waypoints = ordered_clients
-    else:
-        destination = ordered_clients[-1]
-        waypoints = ordered_clients[:-1]
+    all_points = [origin["formatted"]]
 
-    # Google Maps URLs têm limite de waypoints.
-    if len(waypoints) > 9:
-        return None
-
-    params = {
-        "api": "1",
-        "origin": origin["formatted"],
-        "destination": destination["formatted"],
-        "travelmode": "driving",
-        "avoid": "tolls",
-    }
-
-    if waypoints:
-        params["waypoints"] = "|".join(
-            item["formatted"]
-            for item in waypoints
-        )
-
-    return (
-        "https://www.google.com/maps/dir/?"
-        + urlencode(params)
+    all_points.extend(
+        client["formatted"]
+        for client in ordered_clients
     )
 
-
-# =========================================================
-# MODO NAVEGAÇÃO
-# =========================================================
-
-def render_navigation():
-    data = st.session_state.route_data
-
-    if not data:
-        return
-
-    ordered_clients = data["ordered_clients"]
-    origin = data["origin"]
-    round_trip = data["round_trip"]
-    transitions = data["transitions"]
-
-    targets = list(ordered_clients)
-
     if round_trip:
-        targets.append(
+        all_points.append(origin["formatted"])
+
+    links = []
+
+    # Conservador para garantir boa compatibilidade.
+    # Cada bloco tem origem + até 9 waypoints + destino.
+    max_points_per_segment = 11
+
+    start_index = 0
+    segment_number = 1
+
+    while start_index < len(all_points) - 1:
+        segment_points = all_points[
+            start_index:
+            start_index + max_points_per_segment
+        ]
+
+        if len(segment_points) < 2:
+            break
+
+        segment_origin = segment_points[0]
+        segment_destination = segment_points[-1]
+        segment_waypoints = segment_points[1:-1]
+
+        url = google_maps_url(
+            segment_origin,
+            segment_waypoints,
+            segment_destination,
+            avoid_tolls=avoid_tolls,
+        )
+
+        links.append(
             {
-                **origin,
-                "original": "Regresso à origem",
-                "is_return": True,
+                "number": segment_number,
+                "origin": segment_origin,
+                "destination": segment_destination,
+                "url": url,
             }
         )
 
-    total_targets = len(targets)
-    current_index = st.session_state.nav_index
+        start_index += len(segment_points) - 1
+        segment_number += 1
 
-    st.divider()
-    st.markdown("# 🧭 Navegação")
-
-    if current_index >= total_targets:
-        st.success(
-            "🏁 Rota concluída. Todos os destinos foram visitados."
-        )
-
-        if st.button(
-            "↩️ Voltar ao planeamento",
-            use_container_width=True,
-        ):
-            st.session_state.navigation_active = False
-            st.session_state.nav_index = 0
-            st.rerun()
-
-        return
-
-    target = targets[current_index]
-
-    is_return = target.get(
-        "is_return",
-        False,
-    )
-
-    if is_return:
-        title = "Regresso à origem"
-    else:
-        title = target["original"]
-
-    progress_value = (
-        current_index / total_targets
-        if total_targets
-        else 0
-    )
-
-    st.progress(progress_value)
-
-    if is_return:
-        st.caption("Último percurso")
-    else:
-        st.caption(
-            f"Cliente {current_index + 1} "
-            f"de {len(ordered_clients)}"
-        )
-
-    st.markdown(f"## 📍 {title}")
-
-    st.write(target["formatted"])
-
-    # Informação prevista para este troço
-    if current_index < len(transitions):
-        transition = transitions[current_index]
-
-        km = (
-            transition.get(
-                "travelDistanceMeters",
-                0,
-            )
-            / 1000
-        )
-
-        seconds = duration_seconds(
-            transition.get(
-                "travelDuration",
-                "0s",
-            )
-        )
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "Distância prevista",
-            f"{km:.1f} km",
-        )
-
-        col2.metric(
-            "Tempo previsto",
-            format_duration(seconds),
-        )
-
-    maps_url = navigation_url(target)
-
-    st.link_button(
-        "🧭 ABRIR NO GOOGLE MAPS",
-        maps_url,
-        use_container_width=True,
-        type="primary",
-    )
-
-    st.caption(
-        "O Google Maps utiliza a tua localização atual "
-        "e inicia a navegação para este destino."
-    )
-
-    st.write("")
-
-    if is_return:
-        if st.button(
-            "🏁 Cheguei à origem — terminar rota",
-            use_container_width=True,
-        ):
-            st.session_state.nav_index += 1
-            st.rerun()
-
-    else:
-        if st.button(
-            "✅ Cliente concluído — próximo",
-            use_container_width=True,
-            type="primary",
-        ):
-            st.session_state.nav_index += 1
-            st.rerun()
-
-    if current_index > 0:
-        if st.button(
-            "⬅️ Voltar ao destino anterior",
-            use_container_width=True,
-        ):
-            st.session_state.nav_index -= 1
-            st.rerun()
-
-    if st.button(
-        "❌ Sair do modo navegação",
-        use_container_width=True,
-    ):
-        st.session_state.navigation_active = False
-        st.rerun()
+    return links
 
 
 # =========================================================
-# SE NAVEGAÇÃO ESTIVER ATIVA
-# =========================================================
-
-if st.session_state.navigation_active:
-    render_navigation()
-    st.stop()
-
-
-# =========================================================
-# INTERFACE DE PLANEAMENTO
+# INTERFACE
 # =========================================================
 
 origin_input = st.text_input(
@@ -517,14 +361,28 @@ origin_input = st.text_input(
     ),
 )
 
-mode = st.radio(
-    "Tipo de rota",
-    [
-        "Rota aberta — terminar no último cliente",
-        "Ida e volta — regressar à origem",
-    ],
-    horizontal=True,
-)
+col_mode, col_tolls = st.columns(2)
+
+with col_mode:
+    mode = st.radio(
+        "Tipo de rota",
+        [
+            "Rota aberta",
+            "Ida e volta",
+        ],
+    )
+
+with col_tolls:
+    toll_mode = st.radio(
+        "Portagens",
+        [
+            "🚫 Evitar portagens",
+            "🛣️ Portagens permitidas",
+        ],
+    )
+
+round_trip = mode == "Ida e volta"
+avoid_tolls = toll_mode.startswith("🚫")
 
 st.markdown("### Clientes")
 
@@ -546,18 +404,11 @@ clients_input = st.text_area(
     height=280,
 )
 
-optimize_button = st.button(
+if st.button(
     "🚀 Otimizar rota",
     type="primary",
     use_container_width=True,
-)
-
-
-# =========================================================
-# NOVA OTIMIZAÇÃO
-# =========================================================
-
-if optimize_button:
+):
     client_addresses = [
         line.strip()
         for line in clients_input.splitlines()
@@ -565,357 +416,277 @@ if optimize_button:
     ]
 
     if not origin_input.strip():
-        st.error(
-            "Indica o ponto de partida."
-        )
+        st.error("Indica o ponto de partida.")
         st.stop()
 
     if not client_addresses:
-        st.error(
-            "Adiciona pelo menos um cliente."
-        )
+        st.error("Adiciona pelo menos um cliente.")
         st.stop()
 
     try:
-        with st.spinner(
-            "A localizar o ponto de partida..."
-        ):
-            origin = geocode_address(
-                origin_input
-            )
+        with st.spinner("A localizar a origem..."):
+            origin = geocode_address(origin_input)
 
-        geocoded_clients = []
+        clients = []
 
         progress = st.progress(0)
 
-        for i, address in enumerate(
-            client_addresses
-        ):
+        for i, address in enumerate(client_addresses):
             with st.spinner(
                 f"A localizar cliente "
                 f"{i + 1}/{len(client_addresses)}..."
             ):
-                client = geocode_address(
-                    address
-                )
-
-                geocoded_clients.append(
-                    client
+                clients.append(
+                    geocode_address(address)
                 )
 
             progress.progress(
-                (i + 1)
-                / len(client_addresses)
+                (i + 1) / len(client_addresses)
             )
 
         progress.empty()
 
-        round_trip = mode.startswith(
-            "Ida e volta"
-        )
-
-        with st.spinner(
-            "A calcular a melhor sequência "
-            "sem portagens..."
-        ):
+        with st.spinner("A otimizar a rota..."):
             result = optimize_route(
                 origin,
-                geocoded_clients,
+                clients,
                 round_trip=round_trip,
+                avoid_tolls=avoid_tolls,
             )
 
-        routes = result.get(
-            "routes",
-            [],
-        )
+        routes = result.get("routes", [])
 
         if not routes:
-            st.error(
-                "A Google não devolveu "
-                "nenhuma rota válida."
-            )
+            st.error("Não foi encontrada uma rota.")
             st.stop()
 
         route = routes[0]
 
-        visits = route.get(
-            "visits",
-            [],
-        )
-
-        transitions = route.get(
-            "transitions",
-            [],
-        )
+        visits = route.get("visits", [])
+        transitions = route.get("transitions", [])
 
         ordered_clients = []
 
         for visit in visits:
-            shipment_index = visit.get(
-                "shipmentIndex"
-            )
+            shipment_index = visit.get("shipmentIndex")
 
-            if shipment_index is None:
-                continue
-
-            ordered_clients.append(
-                geocoded_clients[
-                    shipment_index
-                ]
-            )
-
-        if not ordered_clients:
-            st.error(
-                "Não foi possível determinar "
-                "a ordem das visitas."
-            )
-            st.stop()
+            if shipment_index is not None:
+                ordered_clients.append(
+                    clients[shipment_index]
+                )
 
         st.session_state.route_data = {
             "origin": origin,
+            "clients": clients,
             "ordered_clients": ordered_clients,
             "round_trip": round_trip,
+            "avoid_tolls": avoid_tolls,
             "route": route,
             "transitions": transitions,
-            "result": result,
         }
 
-        st.session_state.nav_index = 0
-        st.session_state.navigation_active = False
+        st.session_state.manual_order = [
+            client["original"]
+            for client in ordered_clients
+        ]
+
+        st.session_state.validated = False
 
     except Exception as error:
-        st.error(
-            "Ocorreu um erro."
-        )
-        st.code(
-            str(error)
-        )
+        st.error("Ocorreu um erro.")
+        st.code(str(error))
 
 
 # =========================================================
-# MOSTRAR ROTA GUARDADA
+# REVISÃO
 # =========================================================
 
 if st.session_state.route_data:
     data = st.session_state.route_data
 
-    origin = data["origin"]
-    ordered_clients = data[
-        "ordered_clients"
-    ]
-    round_trip = data["round_trip"]
+    st.divider()
+    st.markdown("## 1. Resultado da otimização")
+
     route = data["route"]
-    transitions = data[
-        "transitions"
-    ]
+    metrics = route.get("metrics", {})
 
-    metrics = route.get(
-        "metrics",
-        {},
+    total_km = (
+        metrics.get("travelDistanceMeters", 0)
+        / 1000
     )
 
-    total_distance = metrics.get(
-        "travelDistanceMeters",
-        0,
+    total_time = duration_seconds(
+        metrics.get("travelDuration", "0s")
     )
 
-    total_seconds = duration_seconds(
-        metrics.get(
-            "travelDuration",
-            "0s",
-        )
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Distância",
+        f"{total_km:.1f} km",
     )
 
-    st.success(
-        "✅ Rota otimizada"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "Distância total",
-        f"{total_distance / 1000:.1f} km",
-    )
-
-    col2.metric(
+    c2.metric(
         "Tempo em viagem",
-        format_duration(
-            total_seconds
-        ),
+        format_duration(total_time),
     )
 
-    col3.metric(
+    c3.metric(
         "Clientes",
-        len(ordered_clients),
+        len(data["ordered_clients"]),
     )
 
-    st.caption(
-        "🚫 Sem portagens · "
-        "Autoestradas gratuitas permitidas"
+    if data["avoid_tolls"]:
+        st.caption("🚫 Rota configurada para evitar portagens")
+    else:
+        st.caption("🛣️ Portagens permitidas")
+
+    st.markdown("## 2. Rever e ajustar a ordem")
+
+    st.info(
+        "Se a ordem não estiver correta, altera a posição "
+        "dos clientes abaixo. Só depois valida a rota."
     )
 
-    # =====================================================
-    # BOTÃO NAVEGAÇÃO
-    # =====================================================
+    ordered_names = (
+        st.session_state.manual_order.copy()
+    )
 
-    st.markdown("## 🧭 Pronto para sair?")
+    edited_rows = []
+
+    for i, client_name in enumerate(
+        ordered_names,
+        start=1,
+    ):
+        col1, col2 = st.columns(
+            [1, 5]
+        )
+
+        with col1:
+            new_position = st.number_input(
+                "Pos.",
+                min_value=1,
+                max_value=len(ordered_names),
+                value=i,
+                step=1,
+                key=f"position_{i}_{client_name}",
+                label_visibility="collapsed",
+            )
+
+        with col2:
+            st.write(
+                f"**{i}. {client_name}**"
+            )
+
+        edited_rows.append(
+            {
+                "client": client_name,
+                "position": int(new_position),
+                "original_position": i,
+            }
+        )
 
     if st.button(
-        "🧭 INICIAR NAVEGAÇÃO",
+        "🔄 Aplicar nova ordem",
+        use_container_width=True,
+    ):
+        edited_rows.sort(
+            key=lambda x: (
+                x["position"],
+                x["original_position"],
+            )
+        )
+
+        st.session_state.manual_order = [
+            row["client"]
+            for row in edited_rows
+        ]
+
+        st.session_state.validated = False
+
+        st.rerun()
+
+    st.markdown("### Ordem atual")
+
+    for i, client_name in enumerate(
+        st.session_state.manual_order,
+        start=1,
+    ):
+        st.write(
+            f"**{i}.** {client_name}"
+        )
+
+    st.divider()
+
+    st.markdown("## 3. Validar rota")
+
+    if st.button(
+        "✅ VALIDAR ROTA",
         type="primary",
         use_container_width=True,
     ):
-        st.session_state.nav_index = 0
-        st.session_state.navigation_active = True
+        st.session_state.validated = True
         st.rerun()
 
-    # =====================================================
-    # ROTA COMPLETA
-    # =====================================================
 
-    full_url = full_route_url(
-        origin,
-        ordered_clients,
-        round_trip,
+# =========================================================
+# LINKS FINAIS
+# =========================================================
+
+if (
+    st.session_state.route_data
+    and st.session_state.validated
+):
+    data = st.session_state.route_data
+
+    client_lookup = {
+        client["original"]: client
+        for client in data["clients"]
+    }
+
+    final_clients = [
+        client_lookup[name]
+        for name in st.session_state.manual_order
+    ]
+
+    st.divider()
+    st.markdown("## 4. Rota validada")
+
+    st.success(
+        "✅ Rota validada. "
+        "Os links abaixo já estão prontos para enviar."
     )
 
-    if full_url:
+    links = build_maps_links(
+        data["origin"],
+        final_clients,
+        data["round_trip"],
+        data["avoid_tolls"],
+    )
+
+    for link in links:
+        st.markdown(
+            f"### 🗺️ Rota {link['number']}"
+        )
+
+        st.caption(
+            f"{link['origin']} → "
+            f"{link['destination']}"
+        )
+
         st.link_button(
-            "🗺️ Ver rota completa no Google Maps",
-            full_url,
+            f"📍 Abrir Rota {link['number']} no Google Maps",
+            link["url"],
             use_container_width=True,
-        )
-    else:
-        st.info(
-            "A rota tem demasiadas paragens para "
-            "um único link do Google Maps. "
-            "Usa o modo Navegação, que funciona "
-            "cliente a cliente."
+            type="primary",
         )
 
-    # =====================================================
-    # ORDEM OTIMIZADA
-    # =====================================================
+        st.code(
+            link["url"],
+            language=None,
+        )
 
-    st.markdown(
-        "## 📍 Ordem otimizada"
+    st.caption(
+        f"Foram gerados {len(links)} link(s) "
+        "para esta rota."
     )
-
-    rows = []
-
-    for i, client in enumerate(
-        ordered_clients
-    ):
-        transition = (
-            transitions[i]
-            if i < len(transitions)
-            else {}
-        )
-
-        km = (
-            transition.get(
-                "travelDistanceMeters",
-                0,
-            )
-            / 1000
-        )
-
-        seconds = duration_seconds(
-            transition.get(
-                "travelDuration",
-                "0s",
-            )
-        )
-
-        rows.append(
-            {
-                "Ordem": i + 1,
-                "Cliente": client[
-                    "original"
-                ],
-                "Morada": client[
-                    "formatted"
-                ],
-                "Km": f"{km:.1f} km",
-                "Tempo": format_duration(
-                    seconds
-                ),
-            }
-        )
-
-    if round_trip:
-        return_transition = {}
-
-        if len(transitions) > len(
-            ordered_clients
-        ):
-            return_transition = (
-                transitions[
-                    len(ordered_clients)
-                ]
-            )
-
-        rows.append(
-            {
-                "Ordem": "↩",
-                "Cliente": (
-                    "Regresso à origem"
-                ),
-                "Morada": origin[
-                    "formatted"
-                ],
-                "Km": (
-                    f"{return_transition.get('travelDistanceMeters', 0) / 1000:.1f} km"
-                ),
-                "Tempo": format_duration(
-                    duration_seconds(
-                        return_transition.get(
-                            "travelDuration",
-                            "0s",
-                        )
-                    )
-                ),
-            }
-        )
-
-    dataframe = pd.DataFrame(
-        rows
-    )
-
-    st.dataframe(
-        dataframe,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # =====================================================
-    # MORADAS RECONHECIDAS
-    # =====================================================
-
-    with st.expander(
-        "Ver moradas reconhecidas pela Google"
-    ):
-        st.write(
-            "**Origem:**",
-            origin["formatted"],
-        )
-
-        for i, client in enumerate(
-            ordered_clients,
-            start=1,
-        ):
-            st.write(
-                f"**{i}.** "
-                f"{client['formatted']}"
-            )
-
-    skipped = data["result"].get(
-        "skippedShipments",
-        [],
-    )
-
-    if skipped:
-        st.warning(
-            f"A Google não conseguiu incluir "
-            f"{len(skipped)} cliente(s)."
-        )
