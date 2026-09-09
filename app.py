@@ -78,7 +78,7 @@ st.markdown(
 # =========================================================
 
 SELLERS = {
-    "Vendedor Teste": (
+    "Martins": (
         "Minho Jantes, Rua Da Tomada 13, "
         "4730-325 Oleiros, Vila Verde"
     ),
@@ -741,58 +741,36 @@ def build_navigation_links(
     if not ordered_clients:
         return []
 
-    points = [
-        client["formatted"]
-        for client in ordered_clients
-    ]
+    points = [client["formatted"] for client in ordered_clients]
 
     if round_trip:
-        points.append(
-            return_origin["formatted"]
-        )
+        points.append(return_origin["formatted"])
 
     links = []
-
-    # A navegação final é pensada para abrir diretamente na app Google Maps.
-    # Até 6 paragens por link (5 intermédias + destino).
-    # A origem de ligação não conta como uma nova paragem.
-    points_per_link = 6
-
+    points_per_link = 5
     index = 0
     number = 1
+    previous_endpoint = None
 
     while index < len(points):
-        segment = points[
-            index:
-            index + points_per_link
-        ]
-
+        segment = points[index:index + points_per_link]
         if not segment:
             break
 
-        # A primeira parte começa na localização atual do motorista.
-        # As partes seguintes começam no último ponto da parte anterior,
-        # garantindo continuidade entre os links sem repetir a visita.
-        segment_origin = (
-            None
-            if index == 0
-            else points[index - 1]
-        )
+        link_origin = None if number == 1 else previous_endpoint
 
-        links.append(
-            {
-                "number": number,
-                "origin": segment_origin,
-                "url": google_maps_url(
-                    origin=segment_origin,
-                    waypoints=segment[:-1],
-                    destination=segment[-1],
-                    avoid_tolls=avoid_tolls,
-                    navigation=True,
-                ),
-            }
-        )
+        links.append({
+            "number": number,
+            "url": google_maps_url(
+                origin=link_origin,
+                waypoints=segment[:-1],
+                destination=segment[-1],
+                avoid_tolls=avoid_tolls,
+                navigation=True,
+            ),
+        })
 
+        previous_endpoint = segment[-1]
         index += points_per_link
         number += 1
 
@@ -1050,17 +1028,15 @@ emission_type = (
 
 st.markdown("### 📋 Clientes")
 
-default_clients = """Matriz Auto Braga, R. Cidade do Porto 62, 4705-084 Braga
-Braga Retail Park, Loja K, Lugar De Passos E Lameiras, 4710-426 Braga
-Centro Comercial Nova Arcada, Avenida De Lamas 100 Loja R 05.A, 4700-068 Braga
-Av. Antonio Sergio 508, 4730-709 Vila Verde
-C.C. Minho Center 59, Av. Robert Smith - Fraião, 4715-249 Braga
-Centro Empresarial de Braga, Largo da Misericordia, Pav W2/W3, 4705-319 Braga
-Tesla Center Porto, Av. Fontes Pereira de Melo 318, 4100-259 Porto
-Av. da Independência 1 1C, 4705-162 Braga
-Travessa Marceliano de Araújo 49, Ferreiros, 4705-101 Braga
-Av. Barros e Soares 130, 4715-214 Braga
-BMcar Braga, N101, 4715-213 Braga"""
+default_clients = """Intermarché, Ponte de Lima
+Estação Viana Shopping, Viana do Castelo
+Continente Modelo, Barcelos
+Continente Modelo, Vila Nova de Famalicão
+GuimarãeShopping, Guimarães
+Continente Modelo, Fafe
+Continente Modelo, Felgueiras
+Continente Modelo, Penafiel
+Parque Nascente, Rio Tinto"""
 
 clients_input = st.text_area(
     "Uma morada por linha",
@@ -1164,41 +1140,20 @@ if st.button(
         optimization_route = routes[0]
 
         ordered_clients = []
-        included_shipment_indexes = set()
 
         for visit in optimization_route.get(
             "visits",
             [],
         ):
+            # Na resposta JSON da Google, shipmentIndex=0 pode ser omitido
+            # por ser o valor inteiro por defeito. Nesse caso, o índice é 0.
             shipment_index = visit.get(
-                "shipmentIndex", 0
+                "shipmentIndex",
+                0,
             )
 
-            if (
-                shipment_index is not None
-                and 0 <= shipment_index < len(clients)
-                and shipment_index not in included_shipment_indexes
-            ):
-                ordered_clients.append(
-                    clients[shipment_index]
-                )
-                included_shipment_indexes.add(
-                    shipment_index
-                )
-
-        # O índice zero pode ser omitido no JSON da API. Depois de o ler,
-        # exigir todas as visitas: uma rota incompleta não é válida.
-        missing_shipment_indexes = [
-            index
-            for index in range(len(clients))
-            if index not in included_shipment_indexes
-        ]
-
-        if missing_shipment_indexes:
-            raise RuntimeError(
-                "A otimização não incluiu todos os clientes. "
-                "Não foi criada uma rota incompleta. Em falta: "
-                + "; ".join(clients[i]["original"] for i in missing_shipment_indexes)
+            ordered_clients.append(
+                clients[shipment_index]
             )
 
         if not ordered_clients:
@@ -1209,10 +1164,12 @@ if st.button(
             st.stop()
 
         if len(ordered_clients) != len(clients):
-            raise RuntimeError(
-                "Não foi possível manter todos os clientes na rota. "
-                f"Recebidos: {len(clients)}; incluídos: {len(ordered_clients)}."
+            st.error(
+                f"A otimização devolveu {len(ordered_clients)} de "
+                f"{len(clients)} clientes. A rota não será criada "
+                "enquanto não incluir todas as visitas."
             )
+            st.stop()
 
         with st.spinner(
             "💶 A calcular as alternativas..."
@@ -1380,12 +1337,12 @@ if st.session_state.route_data:
     st.divider()
 
     st.markdown(
-        "## ↕️ Ajustar visitas"
+        "## 🧭 Rota recomendada"
     )
 
     st.caption(
-        "Mantém pressionado e arrasta "
-        "para mudar a ordem."
+        "Esta é a ordem recomendada. "
+        "Altera a ordem apenas se for relevante — mantém pressionado e arrasta."
     )
 
     drag_items = []
@@ -1479,25 +1436,6 @@ if st.session_state.route_data:
                     str(error)
                 )
 
-    st.markdown(
-        "### 📋 Ordem atual"
-    )
-
-    for index, client in enumerate(
-        current_clients,
-        start=1,
-    ):
-        with st.container(
-            border=True
-        ):
-            st.caption(
-                f"PARAGEM {index}"
-            )
-
-            st.write(
-                client["original"]
-            )
-
     st.divider()
 
     comparison_is_current = (
@@ -1587,16 +1525,10 @@ if (
             f"### 🚚 Parte {link['number']}"
         )
 
-        if link["origin"] is None:
-            st.caption(
-                "Ao abrir no telemóvel do motorista, "
-                "a navegação começa na localização atual."
-            )
-        else:
-            st.caption(
-                "Esta parte começa no último ponto "
-                "da parte anterior."
-            )
+        st.caption(
+            "Ao abrir no telemóvel do motorista, "
+            "a navegação começa na localização atual."
+        )
 
         st.link_button(
             (
