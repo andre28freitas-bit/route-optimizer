@@ -1175,11 +1175,20 @@ if st.button(
             "visits",
             [],
         ):
+            # Na resposta JSON da Route Optimization API, o valor 0 de
+            # shipmentIndex pode ser omitido por ser o valor default do
+            # protobuf. Nesse caso, a visita corresponde ao primeiro
+            # cliente da lista (índice 0). Sem este fallback, o primeiro
+            # cliente desaparece da rota otimizada.
             shipment_index = visit.get(
-                "shipmentIndex"
+                "shipmentIndex",
+                0,
             )
 
-            if shipment_index is not None:
+            if (
+                isinstance(shipment_index, int)
+                and 0 <= shipment_index < len(clients)
+            ):
                 ordered_clients.append(
                     clients[shipment_index]
                 )
