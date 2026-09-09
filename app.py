@@ -334,7 +334,6 @@ def optimize_route(
                         "label": client["original"],
                     }
                 ],
-                "penaltyCost": 1000000,
             }
         )
 
@@ -1164,19 +1163,42 @@ if st.button(
         optimization_route = routes[0]
 
         ordered_clients = []
+        included_shipment_indexes = set()
 
         for visit in optimization_route.get(
             "visits",
             [],
         ):
             shipment_index = visit.get(
-                "shipmentIndex"
+                "shipmentIndex", 0
             )
 
-            if shipment_index is not None:
+            if (
+                shipment_index is not None
+                and 0 <= shipment_index < len(clients)
+                and shipment_index not in included_shipment_indexes
+            ):
                 ordered_clients.append(
                     clients[shipment_index]
                 )
+                included_shipment_indexes.add(
+                    shipment_index
+                )
+
+        # O índice zero pode ser omitido no JSON da API. Depois de o ler,
+        # exigir todas as visitas: uma rota incompleta não é válida.
+        missing_shipment_indexes = [
+            index
+            for index in range(len(clients))
+            if index not in included_shipment_indexes
+        ]
+
+        if missing_shipment_indexes:
+            raise RuntimeError(
+                "A otimização não incluiu todos os clientes. "
+                "Não foi criada uma rota incompleta. Em falta: "
+                + "; ".join(clients[i]["original"] for i in missing_shipment_indexes)
+            )
 
         if not ordered_clients:
             st.error(
@@ -1184,6 +1206,12 @@ if st.button(
                 "nenhuma visita."
             )
             st.stop()
+
+        if len(ordered_clients) != len(clients):
+            raise RuntimeError(
+                "Não foi possível manter todos os clientes na rota. "
+                f"Recebidos: {len(clients)}; incluídos: {len(ordered_clients)}."
+            )
 
         with st.spinner(
             "💶 A calcular as alternativas..."
