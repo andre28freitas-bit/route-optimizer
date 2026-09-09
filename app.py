@@ -747,20 +747,33 @@ def build_navigation_links(
         for client in ordered_clients
     ]
 
+    # Numa rota de ida e volta, a origem/base é também o destino final.
     if round_trip:
         points.append(return_origin["formatted"])
 
     links = []
 
-    # Cada link leva até 5 NOVAS paragens.
-    # O último ponto do link anterior passa a ser a origem do seguinte.
-    points_per_link = 5
+    # Máximo de 5 pontos TOTAIS por link, contando a origem.
+    # Como a origem ocupa 1 posição, cada link pode acrescentar
+    # no máximo 4 novos pontos.
+    #
+    # Exemplo com 7 clientes:
+    # Parte 1: Origem -> 1 -> 2 -> 3 -> 4
+    # Parte 2: 4 -> 5 -> 6 -> 7
+    max_total_points_per_link = 5
+    new_points_per_link = max_total_points_per_link - 1
+
     index = 0
     number = 1
     segment_origin = return_origin["formatted"]
 
     while index < len(points):
-        segment = points[index:index + points_per_link]
+        # Só entram aqui os NOVOS pontos desta parte.
+        # A origem da parte já é o último ponto da parte anterior.
+        segment = points[
+            index:
+            index + new_points_per_link
+        ]
 
         if not segment:
             break
@@ -783,10 +796,10 @@ def build_navigation_links(
             }
         )
 
-        # Continuidade entre as partes:
-        # a parte seguinte começa exatamente onde esta terminou.
+        # O último ponto desta parte passa a ser a origem da seguinte.
+        # Não conta como uma nova visita na parte seguinte.
         segment_origin = destination
-        index += points_per_link
+        index += new_points_per_link
         number += 1
 
     return links
