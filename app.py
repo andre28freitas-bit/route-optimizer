@@ -754,8 +754,9 @@ def build_navigation_links(
     links = []
 
     # A navegação final é pensada para abrir diretamente na app Google Maps.
-    # Até 9 waypoints + destino por link.
-    points_per_link = 10
+    # Até 6 paragens por link (5 intermédias + destino).
+    # A origem de ligação não conta como uma nova paragem.
+    points_per_link = 6
 
     index = 0
     number = 1
