@@ -78,7 +78,7 @@ st.markdown(
 # =========================================================
 
 SELLERS = {
-    "Martins": (
+    "Vendedor Teste": (
         "Minho Jantes, Rua Da Tomada 13, "
         "4730-325 Oleiros, Vila Verde"
     ),
@@ -334,6 +334,7 @@ def optimize_route(
                         "label": client["original"],
                     }
                 ],
+                "penaltyCost": 1000000,
             }
         )
 
@@ -754,8 +755,8 @@ def build_navigation_links(
     links = []
 
     # A navegação final é pensada para abrir diretamente na app Google Maps.
-    # Navegação final dividida em blocos de até 5 paragens por link.
-    points_per_link = 5
+    # Até 9 waypoints + destino por link.
+    points_per_link = 10
 
     index = 0
     number = 1
@@ -769,11 +770,21 @@ def build_navigation_links(
         if not segment:
             break
 
+        # A primeira parte começa na localização atual do motorista.
+        # As partes seguintes começam no último ponto da parte anterior,
+        # garantindo continuidade entre os links sem repetir a visita.
+        segment_origin = (
+            None
+            if index == 0
+            else points[index - 1]
+        )
+
         links.append(
             {
                 "number": number,
+                "origin": segment_origin,
                 "url": google_maps_url(
-                    origin=None,
+                    origin=segment_origin,
                     waypoints=segment[:-1],
                     destination=segment[-1],
                     avoid_tolls=avoid_tolls,
@@ -1039,15 +1050,17 @@ emission_type = (
 
 st.markdown("### 📋 Clientes")
 
-default_clients = """Intermarché, Ponte de Lima
-Estação Viana Shopping, Viana do Castelo
-Continente Modelo, Barcelos
-Continente Modelo, Vila Nova de Famalicão
-GuimarãeShopping, Guimarães
-Continente Modelo, Fafe
-Continente Modelo, Felgueiras
-Continente Modelo, Penafiel
-Parque Nascente, Rio Tinto"""
+default_clients = """Matriz Auto Braga, R. Cidade do Porto 62, 4705-084 Braga
+Braga Retail Park, Loja K, Lugar De Passos E Lameiras, 4710-426 Braga
+Centro Comercial Nova Arcada, Avenida De Lamas 100 Loja R 05.A, 4700-068 Braga
+Av. Antonio Sergio 508, 4730-709 Vila Verde
+C.C. Minho Center 59, Av. Robert Smith - Fraião, 4715-249 Braga
+Centro Empresarial de Braga, Largo da Misericordia, Pav W2/W3, 4705-319 Braga
+Tesla Center Porto, Av. Fontes Pereira de Melo 318, 4100-259 Porto
+Av. da Independência 1 1C, 4705-162 Braga
+Travessa Marceliano de Araújo 49, Ferreiros, 4705-101 Braga
+Av. Barros e Soares 130, 4715-214 Braga
+BMcar Braga, N101, 4715-213 Braga"""
 
 clients_input = st.text_area(
     "Uma morada por linha",
@@ -1156,29 +1169,19 @@ if st.button(
             "visits",
             [],
         ):
-            # Na resposta JSON da Google, shipmentIndex=0 pode ser omitido
-            # por ser o valor inteiro por defeito. Nesse caso, o índice é 0.
             shipment_index = visit.get(
-                "shipmentIndex",
-                0,
+                "shipmentIndex"
             )
 
-            ordered_clients.append(
-                clients[shipment_index]
-            )
+            if shipment_index is not None:
+                ordered_clients.append(
+                    clients[shipment_index]
+                )
 
         if not ordered_clients:
             st.error(
                 "A otimização não devolveu "
                 "nenhuma visita."
-            )
-            st.stop()
-
-        if len(ordered_clients) != len(clients):
-            st.error(
-                f"A otimização devolveu {len(ordered_clients)} de "
-                f"{len(clients)} clientes. A rota não será criada "
-                "enquanto não incluir todas as visitas."
             )
             st.stop()
 
@@ -1348,12 +1351,12 @@ if st.session_state.route_data:
     st.divider()
 
     st.markdown(
-        "## 🧭 Rota recomendada"
+        "## ↕️ Ajustar visitas"
     )
 
     st.caption(
-        "Esta é a ordem recomendada. "
-        "Altera a ordem apenas se for relevante — mantém pressionado e arrasta."
+        "Mantém pressionado e arrasta "
+        "para mudar a ordem."
     )
 
     drag_items = []
@@ -1447,6 +1450,25 @@ if st.session_state.route_data:
                     str(error)
                 )
 
+    st.markdown(
+        "### 📋 Ordem atual"
+    )
+
+    for index, client in enumerate(
+        current_clients,
+        start=1,
+    ):
+        with st.container(
+            border=True
+        ):
+            st.caption(
+                f"PARAGEM {index}"
+            )
+
+            st.write(
+                client["original"]
+            )
+
     st.divider()
 
     comparison_is_current = (
@@ -1536,10 +1558,16 @@ if (
             f"### 🚚 Parte {link['number']}"
         )
 
-        st.caption(
-            "Ao abrir no telemóvel do motorista, "
-            "a navegação começa na localização atual."
-        )
+        if link["origin"] is None:
+            st.caption(
+                "Ao abrir no telemóvel do motorista, "
+                "a navegação começa na localização atual."
+            )
+        else:
+            st.caption(
+                "Esta parte começa no último ponto "
+                "da parte anterior."
+            )
 
         st.link_button(
             (
