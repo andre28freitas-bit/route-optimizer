@@ -747,30 +747,29 @@ def build_navigation_links(
         for client in ordered_clients
     ]
 
-    # Numa rota de ida e volta, a base/origem continua a ser o destino final.
+    # Numa rota de ida e volta, a origem/base é também o destino final.
     if round_trip:
         points.append(return_origin["formatted"])
 
     links = []
 
-    # Máximo de 5 pontos TOTAIS por link.
-    # No primeiro link, a origem fica vazia no URL para que o Google Maps
-    # use a localização atual de quem abrir o link.
-    # Nos links seguintes, a origem é o último ponto da parte anterior.
+    # Máximo de 5 pontos TOTAIS por link, contando a origem.
+    # Como a origem ocupa 1 posição, cada link pode acrescentar
+    # no máximo 4 novos pontos.
     #
     # Exemplo com 7 clientes:
-    # Parte 1: Localização atual -> 1 -> 2 -> 3 -> 4
+    # Parte 1: Origem -> 1 -> 2 -> 3 -> 4
     # Parte 2: 4 -> 5 -> 6 -> 7
     max_total_points_per_link = 5
     new_points_per_link = max_total_points_per_link - 1
 
     index = 0
     number = 1
-    previous_destination = None
+    segment_origin = return_origin["formatted"]
 
     while index < len(points):
         # Só entram aqui os NOVOS pontos desta parte.
-        # O ponto repetido entre partes é apenas a origem do link seguinte.
+        # A origem da parte já é o último ponto da parte anterior.
         segment = points[
             index:
             index + new_points_per_link
@@ -782,18 +781,13 @@ def build_navigation_links(
         destination = segment[-1]
         waypoints = segment[:-1]
 
-        # PARTE 1: sem origem fixa. O Google Maps usa a localização atual
-        # do motorista no momento em que ele abrir o link.
-        # PARTES 2+: começam no último destino da parte anterior.
-        link_origin = None if number == 1 else previous_destination
-
         links.append(
             {
                 "number": number,
-                "origin": link_origin,
+                "origin": segment_origin,
                 "destination": destination,
                 "url": google_maps_url(
-                    origin=link_origin,
+                    origin=segment_origin,
                     waypoints=waypoints,
                     destination=destination,
                     avoid_tolls=avoid_tolls,
@@ -802,7 +796,9 @@ def build_navigation_links(
             }
         )
 
-        previous_destination = destination
+        # O último ponto desta parte passa a ser a origem da seguinte.
+        # Não conta como uma nova visita na parte seguinte.
+        segment_origin = destination
         index += new_points_per_link
         number += 1
 
@@ -1560,11 +1556,11 @@ if (
 
         if link["number"] == 1:
             st.caption(
-                "📍 O primeiro link usa a localização atual de quem o abrir no Google Maps."
+                "Abre a rota no Google Maps a partir do ponto de partida definido."
             )
         else:
             st.caption(
-                "📍 Esta parte começa no último ponto da parte anterior."
+                "Esta parte começa no último ponto da parte anterior."
             )
 
         st.link_button(
